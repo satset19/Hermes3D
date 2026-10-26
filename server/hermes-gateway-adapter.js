@@ -261,10 +261,10 @@ const agentRegistry = new Map([
   [AGENT_ID, {
     id: AGENT_ID,
     name: HERMES_AGENT_NAME,
-    workspace: `${HOME}/.hermes/workspace-hermes`,
+    workspace: `${HOME}/.hermes/workspace-${AGENT_ID}`,
     role: "Orchestrator",
     systemPrompt: ORCHESTRATOR_SYSTEM_PROMPT,
-    settings: { wipe: false, continuity: true, model: HERMES_MODEL },
+    settings: { wipe: false, continuity: true, model: HERMES_MODEL, mode: "yolo", yolo: true },
   }],
 ]);
 
@@ -860,7 +860,7 @@ async function execSpawnAgent(args) {
 
   agentRegistry.set(newId, {
     id: newId, name, workspace: `${HOME}/.hermes/workspace-${slug}`,
-    role, systemPrompt, settings: { wipe, continuity, model, boundaries },
+    role, systemPrompt, settings: { wipe, continuity, model, boundaries, mode: "yolo", yolo: true },
   });
   saveAgentsToDisk();
 
@@ -1232,7 +1232,7 @@ async function handleMethod(method, params, id, sendEvent) {
       agentRegistry.set(newId, {
         id: newId, name: agentName, workspace,
         role: "", systemPrompt: `You are ${agentName}.`,
-        settings: { wipe: false, continuity: true, model: HERMES_MODEL },
+        settings: { wipe: false, continuity: true, model: HERMES_MODEL, mode: "yolo", yolo: true },
       });
       try { fs.mkdirSync(workspace, { recursive: true }); } catch {}
       saveAgentsToDisk();
@@ -1307,6 +1307,10 @@ async function handleMethod(method, params, id, sendEvent) {
           origin: { label: agent.name, provider: "hermes" },
           model: settings.model || agent.settings?.model || HERMES_MODEL,
           modelProvider: "hermes",
+          execHost: settings.execHost || "gateway",
+          execSecurity: settings.execSecurity || "full",
+          execAsk: settings.execAsk || "off",
+          yolo: true,
         };
       });
       return resOk(id, { sessions });
@@ -1455,9 +1459,20 @@ async function handleMethod(method, params, id, sendEvent) {
 
     // --- Approvals ----------------------------------------------------------
 
-    case "exec.approvals.get":
-      return resOk(id, { path: "", exists: true, hash: "hermes-approvals",
-        file: { version: 1, defaults: { security: "full", ask: "off", autoAllowSkills: true }, agents: {} } });
+    case "exec.approvals.get": {
+      const agentsMap = {};
+      for (const aid of agentRegistry.keys()) {
+        agentsMap[aid] = { security: "full", ask: "off" };
+      }
+      return resOk(id, {
+        path: "", exists: true, hash: "hermes-approvals",
+        file: {
+          version: 1,
+          defaults: { security: "full", ask: "off", autoAllowSkills: true },
+          agents: agentsMap,
+        },
+      });
+    }
 
     case "exec.approvals.set":
       return resOk(id, { hash: "hermes-approvals" });

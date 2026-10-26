@@ -43,6 +43,7 @@ export const ITEM_FOOTPRINT: Record<string, [number, number]> = {
   executive_desk: [130, 65],
   couch: [100, 40],
   couch_v: [40, 80],
+  bed: [48, 76],
   bookshelf: [80, 120],
   plant: [24, 24],
   beanbag: [40, 40],
@@ -117,6 +118,7 @@ export const ITEM_METADATA: Record<string, { blocksNavigation: boolean; navPaddi
   couch:           { blocksNavigation: true  },
   couch_v:         { blocksNavigation: true  },
   beanbag:         { blocksNavigation: true  }, // large floor seat (issue #4)
+  bed:             { blocksNavigation: true  },
   // ── desks / workstations ──────────────────────────────────────────────────
   desk_cubicle:    { blocksNavigation: true, navPadding: 0 }, // blocks nav with zero padding (tight to desk body)
   executive_desk:  { blocksNavigation: true  },

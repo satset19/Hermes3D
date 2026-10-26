@@ -1017,6 +1017,29 @@ export function OfficeScreen({
   const historyInFlightRef = useRef<Set<string>>(new Set());
   const lastTransportHistoryRefreshKeyRef = useRef<Record<string, string>>({});
   const [chatOpen, setChatOpen] = useState(false);
+  const chatModalRef = useRef<HTMLDivElement>(null);
+  const chatLauncherRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    if (!chatOpen) return;
+
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target as Node | null;
+      if (!target) return;
+      if (
+        chatModalRef.current &&
+        !chatModalRef.current.contains(target) &&
+        !chatLauncherRef.current?.contains(target)
+      ) {
+        setChatOpen(false);
+      }
+    };
+
+    window.addEventListener("pointerdown", handlePointerDown);
+    return () => {
+      window.removeEventListener("pointerdown", handlePointerDown);
+    };
+  }, [chatOpen]);
   const [chatRosterCollapsed, setChatRosterCollapsed] = useState(false);
   const [selectedChatAgentId, setSelectedChatAgentId] = useState<string | null>(
     null,
@@ -5213,6 +5236,7 @@ export function OfficeScreen({
       >
         {chatOpen && (
           <div
+            ref={chatModalRef}
             className="flex overflow-hidden rounded border border-white/10 bg-[#0e0a04] shadow-2xl"
             style={{
               width: chatRosterCollapsed
@@ -5441,6 +5465,7 @@ export function OfficeScreen({
         )}
 
         <button
+          ref={chatLauncherRef}
           type="button"
           onClick={() => setChatOpen((prev) => !prev)}
           className="flex items-center gap-1.5 rounded border border-amber-700/50 bg-[#0e0a04]/90 px-3 py-1.5 font-mono text-[11px] font-medium tracking-wider text-amber-500/80 shadow-lg backdrop-blur transition-colors hover:border-amber-600/70 hover:text-amber-400"

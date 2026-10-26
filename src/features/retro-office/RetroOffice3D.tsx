@@ -79,6 +79,7 @@ import {
 } from "@/features/retro-office/core/constants";
 import {
   ensureOfficeAtm,
+  ensureOfficeBedroom,
   ensureOfficeGymRoom,
   ensureOfficeKanbanBoard,
   ensureOfficePhoneBooth,
@@ -125,7 +126,9 @@ import {
   getMeetingSeatLocations,
   getQaLabStations,
   GYM_DEFAULT_TARGET,
+  isLineOfSightClear,
   isNavAreaFree,
+  isNavPointFree,
   MEETING_OVERFLOW_LOCATIONS,
   QA_LAB_DEFAULT_TARGET,
   resolveDeskIndexForItem,
@@ -160,6 +163,7 @@ import { ConversationChatterAudio } from "@/features/retro-office/systems/conver
 import {
   loadFurniture,
   markAtmMigrationApplied,
+  markBedroomMigrationApplied,
   markGymRoomMigrationApplied,
   markPhoneBoothMigrationApplied,
   markQaLabMigrationApplied,
@@ -180,6 +184,7 @@ import type { OfficeLayoutSnapshot } from "@/lib/office/layoutSnapshot";
 import { AgentModel as AgentObjectModel } from "@/features/retro-office/objects/agents";
 import { JukeboxModel as InteractiveJukeboxModel } from "@/features/retro-office/objects/Jukebox";
 import {
+  BedModel,
   FurnitureModel as GenericFurnitureModel,
   InstancedFurnitureItems as InstancedFurnitureItemsModel,
   PlacementGhost as FurniturePlacementGhost,
@@ -808,6 +813,17 @@ const ReadOnlyFurnitureClone = memo(function ReadOnlyFurnitureClone({
             onPointerOver={NOOP_FURNITURE_UID_HANDLER}
             onPointerOut={NOOP_FURNITURE_HANDLER}
           />
+        ) : item.type === "bed" ? (
+          <BedModel
+            key={item._uid}
+            item={item}
+            isSelected={false}
+            isHovered={false}
+            editMode={false}
+            onPointerDown={NOOP_FURNITURE_UID_HANDLER}
+            onPointerOver={NOOP_FURNITURE_UID_HANDLER}
+            onPointerOut={NOOP_FURNITURE_HANDLER}
+          />
         ) : (
           <GenericFurnitureModel
             key={item._uid}
@@ -861,15 +877,19 @@ function AdaptiveDprController({ maxDpr: maxDprCap = 1.5 }: { maxDpr?: number })
     const maxDpr = Math.min(window.devicePixelRatio || 1, maxDprCap);
     const minDpr = 0.85;
     let nextDpr = currentDprRef.current;
-    if (avgDeltaRef.current > 1 / 42) {
+    if (avgDeltaRef.current > 1 / 30) {
+      nextDpr = Math.max(minDpr, currentDprRef.current - 0.15);
+    } else if (avgDeltaRef.current > 1 / 42) {
       nextDpr = Math.max(minDpr, currentDprRef.current - 0.1);
     } else if (avgDeltaRef.current < 1 / 57) {
       nextDpr = Math.min(maxDpr, currentDprRef.current + 0.05);
     }
     if (Math.abs(nextDpr - currentDprRef.current) < 0.025) return;
-    currentDprRef.current = nextDpr;
-    setDpr(Number(nextDpr.toFixed(2)));
-    gl.info.reset();
+    if (nextDpr !== currentDprRef.current) {
+      currentDprRef.current = nextDpr;
+      setDpr(Number(nextDpr.toFixed(2)));
+      gl.info.reset();
+    }
   });
 
   return null;
@@ -1155,8 +1175,13 @@ function useAgentTick(
       const qaIdx =
         qaByAgentRef.current.get(agent.id) ??
         idx % Math.max(qaLabStations.length, 1);
+      const fallbackDeskPos =
+        deskLocations.length > 0
+          ? (deskLocations[idx % deskLocations.length] ?? null)
+          : null;
       const deskPos =
-        typeof deskIdx === "number" ? (deskLocations[deskIdx] ?? null) : null;
+        (typeof deskIdx === "number" ? (deskLocations[deskIdx] ?? null) : null) ??
+        fallbackDeskPos;
       // Unassigned agents intentionally have no synthetic desk fallback. Desk routing is now
       // driven by persisted workspace assignments instead of sequential scene-local ownership.
       if (!deskPos) {
@@ -1548,34 +1573,6 @@ function useAgentTick(
               ? "standing"
               : "walking";
           ns.facing = phoneBoothRoute.facing;
-        } else if (effectiveStatus === "working" && deskPos) {
-          ns.pingPongUntil = undefined;
-          ns.pingPongTargetX = undefined;
-          ns.pingPongTargetY = undefined;
-          ns.pingPongFacing = undefined;
-          ns.pingPongPartnerId = undefined;
-          ns.pingPongTableUid = undefined;
-          ns.pingPongSide = undefined;
-          ns.walkSpeed =
-            existing.pingPongPreviousWalkSpeed ?? existing.walkSpeed;
-          ns.pingPongPreviousWalkSpeed = undefined;
-          ns.interactionTarget = "desk";
-          ns.phoneBoothStage = undefined;
-          ns.serverRoomStage = undefined;
-          ns.gymStage = undefined;
-          ns.qaLabStage = undefined;
-          ns.qaLabStationType = undefined;
-          ns.workoutStyle = undefined;
-          const targetChanged =
-            existing.targetX !== deskPos.x || existing.targetY !== deskPos.y;
-          ns.targetX = deskPos.x;
-          ns.targetY = deskPos.y;
-          if (targetChanged)
-            ns.path = planPath(existing.x, existing.y, deskPos.x, deskPos.y);
-          ns.state =
-            Math.hypot(existing.x - deskPos.x, existing.y - deskPos.y) < 15
-              ? "sitting"
-              : "walking";
         } else if (effectiveStatus === "working") {
           ns.pingPongUntil = undefined;
           ns.pingPongTargetX = undefined;
@@ -1587,17 +1584,30 @@ function useAgentTick(
           ns.walkSpeed =
             existing.pingPongPreviousWalkSpeed ?? existing.walkSpeed;
           ns.pingPongPreviousWalkSpeed = undefined;
-          ns.interactionTarget = undefined;
+          ns.interactionTarget = deskPos ? "desk" : undefined;
           ns.phoneBoothStage = undefined;
           ns.serverRoomStage = undefined;
           ns.gymStage = undefined;
           ns.qaLabStage = undefined;
           ns.qaLabStationType = undefined;
           ns.workoutStyle = undefined;
-          ns.targetX = existing.x;
-          ns.targetY = existing.y;
-          ns.path = [];
-          ns.state = "standing";
+          if (deskPos) {
+            const targetChanged =
+              existing.targetX !== deskPos.x || existing.targetY !== deskPos.y;
+            ns.targetX = deskPos.x;
+            ns.targetY = deskPos.y;
+            if (targetChanged)
+              ns.path = planPath(existing.x, existing.y, deskPos.x, deskPos.y);
+            ns.state =
+              Math.hypot(existing.x - deskPos.x, existing.y - deskPos.y) < 20
+                ? "sitting"
+                : "walking";
+          } else {
+            ns.targetX = existing.x;
+            ns.targetY = existing.y;
+            ns.path = [];
+            ns.state = "sitting";
+          }
         } else if (effectiveStatus === "error") {
           ns.pingPongUntil = undefined;
           ns.pingPongTargetX = undefined;
@@ -1751,7 +1761,13 @@ function useAgentTick(
               nextTarget.x,
               nextTarget.y,
             );
-            ns.state = "walking";
+            ns.state =
+              Math.hypot(
+                existing.x - nextTarget.x,
+                existing.y - nextTarget.y,
+              ) < 20
+                ? "sitting"
+                : "walking";
           } else if (effectiveStatus === "error") {
             ns.interactionTarget = undefined;
             ns.smsBoothStage = undefined;
@@ -1775,10 +1791,21 @@ function useAgentTick(
             ns.qaLabStationType = undefined;
             ns.workoutStyle = undefined;
             const r = pickRoamPoint(agent.id);
-            ns.targetX = r.x;
-            ns.targetY = r.y;
-            ns.path = planPath(existing.x, existing.y, r.x, r.y);
-            ns.state = "walking";
+            if (isNavPointFree(getNavGrid(), r.x, r.y)) {
+              const path = planPath(existing.x, existing.y, r.x, r.y);
+              if (path.length > 0) {
+                ns.targetX = r.x;
+                ns.targetY = r.y;
+                ns.path = path;
+                ns.state = "walking";
+              } else {
+                ns.path = [];
+                ns.state = "standing";
+              }
+            } else {
+              ns.path = [];
+              ns.state = "standing";
+            }
           }
         }
       } else {
@@ -2167,8 +2194,7 @@ function useAgentTick(
             if (distToSlot > 15 && (agent.conversationReplanAtMs ?? 0) <= now) {
               // Path exhausted away from the slot (blocked route, earlier
               // detour): retry occasionally instead of standing stranded.
-              // When A* finds no route (nav-grid pocket), beeline — a brief
-              // clip beats a participant who never joins the huddle.
+              // If A* finds no route, hold position instead of clipping through obstacles.
               const planned = astar(
                 nx,
                 ny,
@@ -2176,6 +2202,17 @@ function useAgentTick(
                 slotY,
                 grid,
               );
+              if (planned.length === 0) {
+                return {
+                  ...agent,
+                  x: nx,
+                  y: ny,
+                  conversationReplanAtMs: now + 1_500,
+                  path: [],
+                  state: "standing" as const,
+                  frame: agent.frame + 1,
+                };
+              }
               return {
                 ...agent,
                 x: nx,
@@ -2183,10 +2220,7 @@ function useAgentTick(
                 conversationReplanAtMs: now + 1_500,
                 targetX: agent.conversationTargetX,
                 targetY: slotY,
-                path:
-                  planned.length > 0
-                    ? planned
-                    : [{ x: agent.conversationTargetX, y: slotY }],
+                path: planned,
                 state: "walking" as const,
                 frame: agent.frame + 1,
               };
@@ -2438,8 +2472,48 @@ function useAgentTick(
                       ),
                     };
               }
+              if (target && !isNavPointFree(grid, target.x, target.y)) {
+                target = null;
+              }
               if (!target) {
-                target = pickRoamPoint(agent.id);
+                const roamPool = isRemoteOfficeAgentId(agent.id)
+                  ? REMOTE_ROAM_POINTS
+                  : ROAM_POINTS;
+                const freeRoamPoints = roamPool.filter((p) =>
+                  isNavPointFree(grid, p.x, p.y),
+                );
+                if (freeRoamPoints.length > 0) {
+                  target =
+                    freeRoamPoints[
+                      Math.floor(Math.random() * freeRoamPoints.length)
+                    ];
+                } else {
+                  const fallback = pickRoamPoint(agent.id);
+                  if (isNavPointFree(grid, fallback.x, fallback.y)) {
+                    target = fallback;
+                  }
+                }
+              }
+              if (!target || !isNavPointFree(grid, target.x, target.y)) {
+                return {
+                  ...agent,
+                  x: nx,
+                  y: ny,
+                  path: [],
+                  state: ns,
+                  frame: agent.frame + 1,
+                };
+              }
+              const plannedRoam = astar(nx, ny, target.x, target.y, grid);
+              if (plannedRoam.length === 0) {
+                return {
+                  ...agent,
+                  x: nx,
+                  y: ny,
+                  path: [],
+                  state: ns,
+                  frame: agent.frame + 1,
+                };
               }
               return {
                 ...agent,
@@ -2447,7 +2521,7 @@ function useAgentTick(
                 y: ny,
                 targetX: target.x,
                 targetY: target.y,
-                path: astar(nx, ny, target.x, target.y, grid),
+                path: plannedRoam,
                 state: "walking" as const,
                 frame: agent.frame + 1,
               };
@@ -2525,16 +2599,18 @@ const buildInitialFurnitureLayout = (
   storageNamespace: string,
   layoutPreset: OfficeLayoutPreset,
 ): FurnitureItem[] =>
-  ensureOfficeKanbanBoard(
-    ensureOfficeJukebox(
-      ensureOfficeQaLab(
-        ensureOfficeGymRoom(
-          ensureOfficeServerRoom(
-            ensureOfficePhoneBooth(
-              ensureOfficeSmsBooth(
-                ensureOfficeAtm(
-                  ensureOfficePingPongTable(
-                    loadFurniture(storageNamespace) ?? materializeDefaults(layoutPreset),
+  ensureOfficeBedroom(
+    ensureOfficeKanbanBoard(
+      ensureOfficeJukebox(
+        ensureOfficeQaLab(
+          ensureOfficeGymRoom(
+            ensureOfficeServerRoom(
+              ensureOfficePhoneBooth(
+                ensureOfficeSmsBooth(
+                  ensureOfficeAtm(
+                    ensureOfficePingPongTable(
+                      loadFurniture(storageNamespace) ?? materializeDefaults(layoutPreset),
+                    ),
                   ),
                 ),
               ),
@@ -3278,6 +3354,10 @@ export function RetroOffice3D({
 
   useEffect(() => {
     markQaLabMigrationApplied(storageNamespace);
+  }, [storageNamespace]);
+
+  useEffect(() => {
+    markBedroomMigrationApplied(storageNamespace);
   }, [storageNamespace]);
 
   useEffect(() => {
@@ -6273,6 +6353,18 @@ export function RetroOffice3D({
                     onPointerOver={handleFurniturePointerOver}
                     onPointerOut={handleFurniturePointerOut}
                   />
+                ) : item.type === "bed" ? (
+                  <BedModel
+                    key={item._uid}
+                    item={item}
+                    isSelected={item._uid === selectedUid}
+                    isHovered={item._uid === hoverUid}
+                    editMode={editMode}
+                    onPointerDown={handleFurniturePointerDown}
+                    onPointerOver={handleFurniturePointerOver}
+                    onPointerOut={handleFurniturePointerOut}
+                    onClick={handleDeskClick}
+                  />
                 ) : (
                   <GenericFurnitureModel
                     key={item._uid}
@@ -6374,6 +6466,7 @@ export function RetroOffice3D({
             {editMode &&
               drag.kind === "placing" &&
               drag.itemType !== "wall" &&
+              drag.itemType !== "bed" &&
               ghostPos && (
                 <Suspense fallback={null}>
                   <FurniturePlacementGhost
@@ -6415,6 +6508,22 @@ export function RetroOffice3D({
                 onPointerDown={() => {}}
                 onPointerOver={() => {}}
                 onPointerOut={() => {}}
+              />
+            ) : null}
+            {editMode &&
+            drag.kind === "placing" &&
+            drag.itemType === "bed" &&
+            ghostPos ? (
+              <BedModel
+                item={{
+                  _uid: "__bed_ghost__",
+                  type: "bed",
+                  x: worldToCanvas(ghostPos[0], ghostPos[2]).cx,
+                  y: worldToCanvas(ghostPos[0], ghostPos[2]).cy,
+                  w: 48,
+                  h: 76,
+                }}
+                onPointerDown={() => {}}
               />
             ) : null}
 

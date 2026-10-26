@@ -86,6 +86,7 @@ export const FURNITURE_TINT: Record<string, string | null> = {
   fridge: "#505a60",
   water_cooler: "#3a5070",
   whiteboard: "#f4f2ee",
+  bed: "#4a2e18",
   kanban_board: "#8b5e32",
   cabinet: "#3c4248",
   plant: null,
@@ -455,6 +456,251 @@ function WaterCoolerProceduralModel({
   );
 }
 
+const DEFAULT_BED_COLORS = [
+  "#2563eb", // blue
+  "#0d9488", // teal
+  "#881337", // burgundy
+];
+
+type BedProceduralModelProps = {
+  widthWorld: number;
+  depthWorld: number;
+  highlightColor?: string;
+  highlightIntensity?: number;
+  duvetColor?: string;
+};
+
+export function BedProceduralModel({
+  widthWorld,
+  depthWorld,
+  highlightColor = "#000000",
+  highlightIntensity = 0,
+  duvetColor = "#2563eb",
+}: BedProceduralModelProps) {
+  const legThickness = 0.05;
+  const legHeight = 0.12;
+  const legOffsetLeft = -widthWorld / 2 + legThickness / 2 + 0.01;
+  const legOffsetRight = widthWorld / 2 - legThickness / 2 - 0.01;
+  const legOffsetBack = -depthWorld / 2 + legThickness / 2 + 0.01;
+  const legOffsetFront = depthWorld / 2 - legThickness / 2 - 0.01;
+
+  const frameThickness = 0.07;
+  const frameY = legHeight + frameThickness / 2;
+
+  const headboardHeight = 0.46;
+  const headboardThickness = 0.04;
+  const headboardY = headboardHeight / 2;
+
+  const footboardHeight = 0.22;
+  const footboardThickness = 0.035;
+  const footboardY = footboardHeight / 2;
+
+  const mattressWidth = widthWorld * 0.92;
+  const mattressDepth = depthWorld * 0.92;
+  const mattressHeight = 0.14;
+  const mattressY = legHeight + frameThickness + mattressHeight / 2;
+
+  const pillowWidth = widthWorld * 0.72;
+  const pillowDepth = depthWorld * 0.22;
+  const pillowHeight = 0.06;
+  const pillowY = legHeight + frameThickness + mattressHeight + pillowHeight / 2 - 0.01;
+  const pillowZ = -depthWorld / 2 + headboardThickness + pillowDepth / 2 + 0.04;
+
+  const duvetWidth = widthWorld * 0.94;
+  const duvetDepth = depthWorld * 0.64;
+  const duvetHeight = 0.05;
+  const duvetY = legHeight + frameThickness + mattressHeight + duvetHeight / 2;
+  const duvetZ = depthWorld / 2 - duvetDepth / 2 - footboardThickness;
+
+  const foldDepth = 0.08;
+  const foldY = duvetY + 0.005;
+  const foldZ = duvetZ - duvetDepth / 2 - foldDepth / 2;
+
+  return (
+    <group>
+      {/* 4 Wooden Legs */}
+      {[
+        [legOffsetLeft, legOffsetBack],
+        [legOffsetRight, legOffsetBack],
+        [legOffsetLeft, legOffsetFront],
+        [legOffsetRight, legOffsetFront],
+      ].map(([lx, lz], i) => (
+        <mesh
+          key={`bed-leg-${i}`}
+          position={[lx, legHeight / 2, lz]}
+          castShadow
+          receiveShadow
+        >
+          <boxGeometry args={[legThickness, legHeight, legThickness]} />
+          <meshStandardMaterial
+            color="#4a2e18"
+            roughness={0.7}
+            emissive={highlightColor}
+            emissiveIntensity={highlightIntensity}
+          />
+        </mesh>
+      ))}
+
+      {/* Wooden Bed Frame Base */}
+      <mesh position={[0, frameY, 0]} castShadow receiveShadow>
+        <boxGeometry args={[widthWorld, frameThickness, depthWorld]} />
+        <meshStandardMaterial
+          color="#4a2e18"
+          roughness={0.7}
+          emissive={highlightColor}
+          emissiveIntensity={highlightIntensity}
+        />
+      </mesh>
+
+      {/* Headboard */}
+      <mesh
+        position={[0, headboardY, -depthWorld / 2 + headboardThickness / 2]}
+        castShadow
+        receiveShadow
+      >
+        <boxGeometry
+          args={[widthWorld + 0.02, headboardHeight, headboardThickness]}
+        />
+        <meshStandardMaterial
+          color="#4a2e18"
+          roughness={0.65}
+          emissive={highlightColor}
+          emissiveIntensity={highlightIntensity}
+        />
+      </mesh>
+
+      {/* Footboard */}
+      <mesh
+        position={[0, footboardY, depthWorld / 2 - footboardThickness / 2]}
+        castShadow
+        receiveShadow
+      >
+        <boxGeometry
+          args={[widthWorld + 0.02, footboardHeight, footboardThickness]}
+        />
+        <meshStandardMaterial
+          color="#4a2e18"
+          roughness={0.65}
+          emissive={highlightColor}
+          emissiveIntensity={highlightIntensity}
+        />
+      </mesh>
+
+      {/* Mattress (#f8fafc) */}
+      <mesh position={[0, mattressY, 0]} castShadow receiveShadow>
+        <boxGeometry args={[mattressWidth, mattressHeight, mattressDepth]} />
+        <meshStandardMaterial
+          color="#f8fafc"
+          roughness={0.88}
+          metalness={0.02}
+        />
+      </mesh>
+
+      {/* Pillow */}
+      <mesh
+        position={[0, pillowY, pillowZ]}
+        rotation={[0.08, 0, 0]}
+        castShadow
+        receiveShadow
+      >
+        <boxGeometry args={[pillowWidth, pillowHeight, pillowDepth]} />
+        <meshStandardMaterial
+          color="#ffffff"
+          roughness={0.92}
+        />
+      </mesh>
+
+      {/* Duvet / Blanket */}
+      <mesh position={[0, duvetY, duvetZ]} castShadow receiveShadow>
+        <boxGeometry args={[duvetWidth, duvetHeight, duvetDepth]} />
+        <meshStandardMaterial
+          color={duvetColor}
+          roughness={0.75}
+          metalness={0.05}
+          emissive={highlightColor}
+          emissiveIntensity={highlightIntensity * 0.4}
+        />
+      </mesh>
+
+      {/* Folded Sheet Accent */}
+      <mesh position={[0, foldY, foldZ]} castShadow receiveShadow>
+        <boxGeometry args={[duvetWidth, duvetHeight * 0.7, foldDepth]} />
+        <meshStandardMaterial
+          color="#f1f5f9"
+          roughness={0.85}
+        />
+      </mesh>
+    </group>
+  );
+}
+
+export function BedModel({
+  item,
+  isSelected = false,
+  isHovered = false,
+  editMode = false,
+  onPointerDown,
+  onPointerOver,
+  onPointerOut,
+  onClick,
+}: Partial<InteractiveFurnitureModelProps> & { item: FurnitureItem }) {
+  const [wx, , wz] = toWorld(item.x, item.y);
+  const { width, height } = getItemBaseSize(item);
+  const widthWorld = width * SCALE;
+  const depthWorld = height * SCALE;
+  const rotY = getItemRotationRadians(item);
+  const pivotX = widthWorld * 0.5;
+  const pivotZ = depthWorld * 0.5;
+
+  const highlightColor = isSelected
+    ? "#fbbf24"
+    : isHovered && editMode
+      ? "#4a90d9"
+      : "#000000";
+  const highlightIntensity = isSelected ? 0.35 : isHovered && editMode ? 0.25 : 0;
+
+  const duvetColor = useMemo(() => {
+    if (item.color) return item.color;
+    const match = item._uid?.match(/\d+/);
+    const index = match
+      ? parseInt(match[0], 10)
+      : Math.abs(Math.round(item.x * 7 + item.y * 13));
+    return DEFAULT_BED_COLORS[index % DEFAULT_BED_COLORS.length]!;
+  }, [item._uid, item.color, item.x, item.y]);
+
+  return (
+    <group
+      position={[wx, item.elevation ?? 0, wz]}
+      onPointerDown={(event) => {
+        event.stopPropagation();
+        onPointerDown?.(item._uid);
+      }}
+      onPointerOver={(event) => {
+        event.stopPropagation();
+        onPointerOver?.(item._uid);
+      }}
+      onPointerOut={(event) => {
+        event.stopPropagation();
+        onPointerOut?.();
+      }}
+      onClick={(event) => {
+        event.stopPropagation();
+        onClick?.(item._uid);
+      }}
+    >
+      <group position={[pivotX, 0, pivotZ]} rotation={[0, rotY, 0]}>
+        <BedProceduralModel
+          widthWorld={widthWorld}
+          depthWorld={depthWorld}
+          highlightColor={highlightColor}
+          highlightIntensity={highlightIntensity}
+          duvetColor={duvetColor}
+        />
+      </group>
+    </group>
+  );
+}
+
 export function InstancedFurnitureItems({
   itemType,
   items,
@@ -808,6 +1054,14 @@ export function FurnitureModel({
             highlightColor={highlightColor}
             highlightIntensity={highlightIntensity}
           />
+        ) : itemType === "bed" ? (
+          <BedProceduralModel
+            widthWorld={width * SCALE}
+            depthWorld={height * SCALE}
+            highlightColor={highlightColor}
+            highlightIntensity={highlightIntensity}
+            duvetColor={item.color}
+          />
         ) : (
           <group position={[-pivotX, 0, -pivotZ]} scale={scale}>
             <primitive object={cloned} />
@@ -1048,6 +1302,13 @@ export function PlacementGhost({
           highlightColor="#000000"
           highlightIntensity={0}
         />
+      ) : itemType === "bed" ? (
+        <BedProceduralModel
+          widthWorld={footprint[0] * SCALE}
+          depthWorld={footprint[1] * SCALE}
+          highlightColor="#000000"
+          highlightIntensity={0}
+        />
       ) : (
         <group scale={scale}>
           <primitive object={cloned} />
@@ -1057,7 +1318,7 @@ export function PlacementGhost({
         rotation={[-Math.PI / 2, 0, 0]}
         position={[0, 0.01, 0]}
         scale={
-          itemType === "whiteboard" || itemType === "water_cooler"
+          itemType === "whiteboard" || itemType === "water_cooler" || itemType === "bed"
             ? [1, 1, 1]
             : [scale[0], scale[2], 1]
         }

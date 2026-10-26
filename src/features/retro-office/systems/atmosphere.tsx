@@ -107,7 +107,7 @@ function ParkTree({
 
   return (
     <group position={position} scale={[scale, scale, scale]} rotation={[0, 0, lean]}>
-      <mesh position={[0, 0.8, 0]} castShadow>
+      <mesh position={[0, 0.8, 0]}>
         <cylinderGeometry args={[0.09, 0.14, 1.6, 8]} />
         <meshStandardMaterial color="#5d4a36" roughness={0.95} />
       </mesh>
@@ -122,7 +122,6 @@ function ParkTree({
               1.7 + index * 0.34,
               Math.sin(angle) * spread * 0.6,
             ]}
-            castShadow
           >
             <sphereGeometry args={[0.85 - index * 0.16, 12, 10]} />
             <meshStandardMaterial
@@ -136,7 +135,7 @@ function ParkTree({
   );
 }
 
-const DUST_COUNT = 220;
+const DUST_COUNT = 60;
 
 /**
  * Faint warm dust motes drifting through the office air — invisible from
@@ -169,6 +168,7 @@ function DustMotes({
   }, [centerX, centerZ, extentX, extentZ]);
 
   useFrame(({ clock }) => {
+    if (document.visibilityState !== "visible") return;
     const points = pointsRef.current;
     if (!points) return;
     const attribute = points.geometry.getAttribute("position") as THREE.BufferAttribute;

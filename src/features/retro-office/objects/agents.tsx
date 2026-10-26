@@ -24,6 +24,7 @@ import type {
 import { AgentModelProps } from "@/features/retro-office/objects/types";
 
 const MAX_NAMEPLATE_TEXT_LENGTH = 10;
+const MAX_SUBTITLE_TEXT_LENGTH = 20;
 const MAX_SPEECH_BUBBLE_TEXT_LENGTH = 180;
 const MAX_SPEECH_BUBBLE_LINES = 4;
 
@@ -33,6 +34,30 @@ const formatAgentNameplateText = (value: string): string => {
   if (normalized.length <= MAX_NAMEPLATE_TEXT_LENGTH) return normalized;
   const [firstName] = normalized.split(" ");
   return firstName || normalized;
+};
+
+/**
+ * Compress a role description to one short nameplate line.
+ *
+ * Agent roles arrive as full sentences ("technical planner and business
+ * systems analyst for Smartways. Converts Jira tickets into…"); rendered raw
+ * they wrap into a wall of text above every agent. Keep the first clause,
+ * clamped at a word boundary, so the plate stays a single line.
+ */
+export const formatAgentSubtitleText = (value: string): string => {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (!normalized) return "";
+  const clause =
+    normalized.split(/(?:\.\s+|\s+[—–]\s+)/)[0]?.replace(/[.;\s]+$/, "") ||
+    normalized;
+  if (clause.length <= MAX_SUBTITLE_TEXT_LENGTH) return clause;
+  const cut = clause.slice(0, MAX_SUBTITLE_TEXT_LENGTH);
+  const lastSpace = cut.lastIndexOf(" ");
+  const head = (lastSpace > 8 ? cut.slice(0, lastSpace) : cut).replace(
+    /[\s,;:]+$/,
+    "",
+  );
+  return `${head}…`;
 };
 
 const flattenSpeechBubbleMarkdown = (value: string) =>
@@ -201,7 +226,7 @@ export const AgentModel = memo(function AgentModel({
       headRef.current.rotation.z = 0;
       if (isTyping) {
         headRef.current.rotation.x =
-          0.08 + Math.sin(agent.frame * 0.18) * 0.03;
+          0.12 + Math.sin(agent.frame * 0.18) * 0.04;
       }
     }
 
@@ -261,7 +286,7 @@ export const AgentModel = memo(function AgentModel({
           0.2 + Math.sin(agent.frame * 0.08) * 0.28;
       } else if (isSitting) {
         if (isTyping) {
-          leftArmRef.current.rotation.x = -0.55 + typingPhase * 0.12;
+          leftArmRef.current.rotation.x = -0.55 + typingPhase * 0.15;
           leftArmRef.current.rotation.y = 0.15;
         } else {
           leftArmRef.current.rotation.x = 0.3;
@@ -325,7 +350,7 @@ export const AgentModel = memo(function AgentModel({
           0.08 - Math.sin(agent.frame * 0.08) * 0.16;
       } else if (isSitting) {
         if (isTyping) {
-          rightArmRef.current.rotation.x = -0.55 - typingPhase * 0.12;
+          rightArmRef.current.rotation.x = -0.55 - typingPhase * 0.15;
           rightArmRef.current.rotation.y = -0.15;
         } else {
           rightArmRef.current.rotation.x = 0.3;
@@ -674,12 +699,12 @@ export const AgentModel = memo(function AgentModel({
   const speechBubbleWasTruncated = speechBubblePreview.truncated;
   const speechBubbleTextLength = speechBubbleDisplayText.length;
   const speechBubbleWidth = activeSpeechBubble
-    ? Math.min(2.7, Math.max(1.15, 0.95 + speechBubbleTextLength * 0.011))
-    : 0.36;
-  const speechBubblePaddingX = activeSpeechBubble ? 0.18 : 0.05;
-  const speechBubblePaddingY = activeSpeechBubble ? 0.14 : 0.05;
+    ? Math.min(1.5, Math.max(0.65, 0.52 + speechBubbleTextLength * 0.006))
+    : 0.22;
+  const speechBubblePaddingX = activeSpeechBubble ? 0.09 : 0.03;
+  const speechBubblePaddingY = activeSpeechBubble ? 0.07 : 0.03;
   const speechBubbleMaxWidth = Math.max(
-    0.2,
+    0.12,
     speechBubbleWidth - speechBubblePaddingX,
   );
   const estimatedSpeechCharsPerLine = activeSpeechBubble
@@ -695,15 +720,15 @@ export const AgentModel = memo(function AgentModel({
       )
     : 1;
   const speechBubbleHeight = activeSpeechBubble
-    ? Math.max(0.38, estimatedSpeechLines * 0.16 + speechBubblePaddingY)
-    : 0.2;
+    ? Math.max(0.22, estimatedSpeechLines * 0.09 + speechBubblePaddingY)
+    : 0.12;
   const speechBubbleFontSize = activeSpeechBubble
     ? speechBubbleTextLength > 110
-      ? 0.112
+      ? 0.065
       : speechBubbleTextLength > 70
-        ? 0.122
-        : 0.134
-    : 0.1;
+        ? 0.071
+        : 0.078
+    : 0.06;
   const speechBubbleTextColor = activeSpeechBubble
     ? "#f8fafc"
     : status === "error"
@@ -718,7 +743,7 @@ export const AgentModel = memo(function AgentModel({
         ? "#93f57d"
         : "#8dc4ff"
     : "transparent";
-  const speechBubbleBorderInset = activeSpeechBubble ? 0.03 : 0;
+  const speechBubbleBorderInset = activeSpeechBubble ? 0.02 : 0;
   const nameplateText = name ? formatAgentNameplateText(name) : "";
   const subtitleText = typeof subtitle === "string" ? subtitle.trim() : "";
   const nameplateFontSize =
@@ -1199,11 +1224,11 @@ export const AgentModel = memo(function AgentModel({
         <Billboard position={[0, 1.18, 0]}>
           {activeSpeechBubble ? (
             <mesh
-              position={[-speechBubbleWidth * 0.18, -speechBubbleHeight * 0.53, -0.0005]}
+              position={[-speechBubbleWidth * 0.18, -speechBubbleHeight * 0.52, -0.0005]}
               rotation={[0, 0, Math.PI / 4]}
               renderOrder={99997}
             >
-              <planeGeometry args={[0.13, 0.13]} />
+              <planeGeometry args={[0.07, 0.07]} />
               <meshBasicMaterial
                 color="#1a2030"
                 transparent
@@ -1264,7 +1289,7 @@ export const AgentModel = memo(function AgentModel({
           {activeSpeechBubble && speechBubbleWasTruncated ? (
             <Text
               position={[0, -speechBubbleHeight * 0.34, 0.001]}
-              fontSize={0.09}
+              fontSize={0.05}
               color="#8ab4ff"
               anchorX="center"
               anchorY="middle"

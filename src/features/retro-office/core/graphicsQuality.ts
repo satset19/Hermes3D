@@ -18,12 +18,12 @@ export const GRAPHICS_QUALITY_OPTIONS: Array<{
   {
     id: "balanced",
     label: "Balanced",
-    description: "Ambient occlusion, bloom and soft shadows.",
+    description: "Bloom and soft shadows.",
   },
   {
     id: "ultra",
     label: "Ultra",
-    description: "Maximum fidelity. Large shadow maps and full effects.",
+    description: "Maximum fidelity. Ambient occlusion, large shadow maps and full effects.",
   },
 ];
 
@@ -48,8 +48,8 @@ export type GraphicsQualityConfig = {
 
 const QUALITY_CONFIGS: Record<GraphicsQuality, GraphicsQualityConfig> = {
   low: {
-    shadowMapSize: 1024,
-    maxDpr: 1.25,
+    shadowMapSize: 512,
+    maxDpr: 1.0,
     postProcessing: false,
     ambientOcclusion: false,
     aoQuality: "performance",
@@ -58,21 +58,21 @@ const QUALITY_CONFIGS: Record<GraphicsQuality, GraphicsQualityConfig> = {
     followDepthOfField: false,
   },
   balanced: {
+    shadowMapSize: 1024,
+    maxDpr: 1.15,
+    postProcessing: true,
+    ambientOcclusion: false,
+    aoQuality: "low",
+    bloom: true,
+    smaa: false,
+    followDepthOfField: false,
+  },
+  ultra: {
     shadowMapSize: 2048,
     maxDpr: 1.5,
     postProcessing: true,
     ambientOcclusion: true,
     aoQuality: "low",
-    bloom: true,
-    smaa: true,
-    followDepthOfField: false,
-  },
-  ultra: {
-    shadowMapSize: 4096,
-    maxDpr: 2,
-    postProcessing: true,
-    ambientOcclusion: true,
-    aoQuality: "medium",
     bloom: true,
     smaa: true,
     followDepthOfField: true,

@@ -1,4 +1,8 @@
 import {
+  BEDROOM_DOOR_Y,
+  BEDROOM_ROOM_END_X,
+  BEDROOM_ROOM_WIDTH,
+  BEDROOM_ROOM_X,
   DOOR_LENGTH,
   DOOR_THICKNESS,
   EAST_WING_DOOR_Y,
@@ -13,6 +17,7 @@ import {
 import { nextUid } from "@/features/retro-office/core/geometry";
 import {
   hasAtmMigrationApplied,
+  hasBedroomMigrationApplied,
   hasGymRoomMigrationApplied,
   hasPhoneBoothMigrationApplied,
   hasQaLabMigrationApplied,
@@ -407,6 +412,63 @@ const DEFAULT_QA_LAB_ITEMS: FurnitureSeed[] = [
   { type: "plant", x: 1496, y: 622 },
 ];
 
+export const DEFAULT_BEDROOM_ITEMS: FurnitureSeed[] = [
+  // Perimeter walls
+  {
+    type: "wall",
+    x: BEDROOM_ROOM_X,
+    y: EAST_WING_ROOM_TOP_Y,
+    w: BEDROOM_ROOM_WIDTH + WALL_THICKNESS,
+    h: WALL_THICKNESS,
+  },
+  {
+    type: "wall",
+    x: BEDROOM_ROOM_X,
+    y: EAST_WING_ROOM_BOTTOM_WALL_Y,
+    w: BEDROOM_ROOM_WIDTH + WALL_THICKNESS,
+    h: WALL_THICKNESS,
+  },
+  {
+    type: "wall",
+    x: BEDROOM_ROOM_END_X,
+    y: EAST_WING_ROOM_TOP_Y,
+    w: WALL_THICKNESS,
+    h: EAST_WING_ROOM_HEIGHT,
+  },
+  {
+    type: "wall",
+    x: BEDROOM_ROOM_X,
+    y: EAST_WING_ROOM_TOP_Y,
+    w: WALL_THICKNESS,
+    h: BEDROOM_DOOR_Y - EAST_WING_ROOM_TOP_Y,
+  },
+  {
+    type: "door",
+    x: BEDROOM_ROOM_X,
+    y: BEDROOM_DOOR_Y,
+    w: DOOR_LENGTH,
+    h: DOOR_THICKNESS,
+    facing: 90,
+  },
+  {
+    type: "wall",
+    x: BEDROOM_ROOM_X,
+    y: BEDROOM_DOOR_Y + DOOR_LENGTH,
+    w: WALL_THICKNESS,
+    h: EAST_WING_ROOM_HEIGHT - (BEDROOM_DOOR_Y + DOOR_LENGTH - EAST_WING_ROOM_TOP_Y),
+  },
+  // 9 beds arranged neatly in 3 rows x 3 columns
+  { type: "bed", x: 1565, y: 100, color: "#1e40af" },
+  { type: "bed", x: 1640, y: 100, color: "#0f766e" },
+  { type: "bed", x: 1715, y: 100, color: "#881337" },
+  { type: "bed", x: 1565, y: 260, color: "#0f766e" },
+  { type: "bed", x: 1640, y: 260, color: "#881337" },
+  { type: "bed", x: 1715, y: 260, color: "#1e40af" },
+  { type: "bed", x: 1565, y: 420, color: "#881337" },
+  { type: "bed", x: 1640, y: 420, color: "#1e40af" },
+  { type: "bed", x: 1715, y: 420, color: "#0f766e" },
+];
+
 const DEFAULT_ART_ROOM_ITEMS: FurnitureSeed[] = [
   { type: "wall", x: 260, y: 40, w: 8, h: 230 },
   { type: "wall", x: 260, y: 40, w: 178, h: 8 },
@@ -451,6 +513,7 @@ const DEFAULT_LOBBY_FURNITURE: FurnitureSeed[] = [
   ...DEFAULT_GYM_ITEMS,
   ...DEFAULT_QA_LAB_ITEMS,
   ...DEFAULT_ART_ROOM_ITEMS,
+  ...DEFAULT_BEDROOM_ITEMS,
 ];
 
 const DEFAULT_FURNITURE: FurnitureSeed[] = [
@@ -553,6 +616,7 @@ const DEFAULT_FURNITURE: FurnitureSeed[] = [
   ...DEFAULT_GYM_ITEMS,
   ...DEFAULT_QA_LAB_ITEMS,
   ...DEFAULT_ART_ROOM_ITEMS,
+  ...DEFAULT_BEDROOM_ITEMS,
   DEFAULT_SMS_BOOTH,
   { type: "chair", x: 100, y: 200, facing: 180 },
 ];
@@ -560,10 +624,12 @@ const DEFAULT_FURNITURE: FurnitureSeed[] = [
 export const materializeDefaults = (
   preset: OfficeLayoutPreset = "office",
 ): FurnitureItem[] =>
-  (preset === "lobby" ? DEFAULT_LOBBY_FURNITURE : DEFAULT_FURNITURE).map((item, index) => ({
-    ...item,
-    _uid: `${preset}_${index}`,
-  }));
+  ensureOfficeBedroom(
+    (preset === "lobby" ? DEFAULT_LOBBY_FURNITURE : DEFAULT_FURNITURE).map((item, index) => ({
+      ...item,
+      _uid: `${preset}_${index}`,
+    })),
+  );
 
 export const isRetiredPingPongLamp = (item: FurnitureItem) =>
   item.type === "lamp" &&
@@ -610,6 +676,9 @@ const PREVIOUS_QA_LAB_SIGNATURES = new Set(
 );
 const QA_LAB_SIGNATURES = new Set(
   DEFAULT_QA_LAB_ITEMS.map(createFurnitureSignature),
+);
+const BEDROOM_SIGNATURES = new Set(
+  DEFAULT_BEDROOM_ITEMS.map(createFurnitureSignature),
 );
 
 const hasSignature = (items: FurnitureItem[], signatures: Set<string>) =>
@@ -796,5 +865,21 @@ export const ensureOfficeQaLab = (items: FurnitureItem[]): FurnitureItem[] => {
   return [
     ...items,
     ...DEFAULT_QA_LAB_ITEMS.map((item) => ({ ...item, _uid: nextUid() })),
+  ];
+};
+
+export function ensureOfficeBedroom(
+  items: FurnitureItem[],
+): FurnitureItem[] {
+  const hasCurrentBedroom = hasSignature(items, BEDROOM_SIGNATURES);
+  if (hasCurrentBedroom) return items;
+
+  const hasBeds = items.some((item) => item.type === "bed");
+  if (hasBeds) return items;
+  if (hasBedroomMigrationApplied()) return items;
+
+  return [
+    ...items,
+    ...DEFAULT_BEDROOM_ITEMS.map((item) => ({ ...item, _uid: nextUid() })),
   ];
 };
