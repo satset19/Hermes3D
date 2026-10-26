@@ -46,6 +46,7 @@ import {
 } from "@/features/agents/operations/studioBootstrapOperation";
 import { isGatewayDisconnectLikeError } from "@/lib/gateway/GatewayClient";
 import { createGatewayRuntimeEventHandler } from "@/features/agents/state/gatewayRuntimeEventHandler";
+import { shouldKeepLiveRun, toInferredRunId } from "@/features/agents/state/inferredRunId";
 import {
   buildHistoryLines,
   classifyGatewayEventKind,
@@ -1572,14 +1573,16 @@ export function OfficeScreen({
             const nextStatus: AgentState["status"] = inferredRunning
               ? "running"
               : "idle";
-            if (agent.status !== nextStatus) {
+            if (!inferredRunning && shouldKeepLiveRun(agent, Date.now())) {
+              // History lags live team runs; the run's own final/error frame ends it.
+            } else if (agent.status !== nextStatus) {
               dispatch({
                 type: "updateAgent",
                 agentId: agent.agentId,
                 patch: {
                   status: nextStatus,
                   runId: inferredRunning
-                    ? (agent.runId ?? `inferred-${agent.agentId}`)
+                    ? (agent.runId ?? toInferredRunId(agent.agentId))
                     : null,
                 },
               });
