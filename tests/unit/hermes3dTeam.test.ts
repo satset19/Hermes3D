@@ -98,6 +98,19 @@ describe("hermes3d team manager", () => {
     expect(manager.listTeam().find((a: { id: string }) => a.id === "designer-1c1143").busy).toBe(false);
   });
 
+  it("aborts the run's signal when it times out", async () => {
+    let signal: AbortSignal | undefined;
+    const run = vi.fn((args: { signal: AbortSignal }) => {
+      signal = args.signal;
+      return new Promise(() => {});
+    });
+    const { manager } = makeManager(run, { runTimeoutMs: 20 });
+    manager.assign({ caller_agent_id: "hermes", agent_id: "designer-1c1143", task: "t" });
+    await manager.status({ run_id: "run1", wait_seconds: 1 });
+    expect(signal?.aborted).toBe(true);
+    expect(String(signal?.reason?.message)).toMatch(/timed out/);
+  });
+
   it("refuses a busy target, then accepts once it is free", async () => {
     const d = deferred();
     const { manager } = makeManager(vi.fn(() => d.promise));

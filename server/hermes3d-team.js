@@ -38,10 +38,17 @@ function createTeamManager({
   const iso = () => new Date(now()).toISOString();
 
   // streamOneTurn has no timeout of its own; without this a hung run keeps the target busy forever.
-  const withTimeout = (promise) => new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`Run timed out after ${runTimeoutMs} ms`)), runTimeoutMs);
+  // The abort reaches runAgentTurn, which closes the Hermes stream so the Hermes session stops too.
+  const withTimeout = (start) => new Promise((resolve, reject) => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      const err = new Error(`Run timed out after ${runTimeoutMs} ms`);
+      controller.abort(err);
+      reject(err);
+    }, runTimeoutMs);
     if (timer.unref) timer.unref();
-    promise.then((v) => { clearTimeout(timer); resolve(v); }, (e) => { clearTimeout(timer); reject(e); });
+    Promise.resolve().then(() => start(controller.signal))
+      .then((v) => { clearTimeout(timer); resolve(v); }, (e) => { clearTimeout(timer); reject(e); });
   });
 
   const listTeam = () =>
@@ -112,11 +119,12 @@ function createTeamManager({
     emit("chat", { state: "delta", message: { role: "user", content: message } });
     emit("agent", { stream: "lifecycle", data: { phase: "start" } });
 
-    withTimeout(Promise.resolve().then(() => runAgentTurn({
+    withTimeout((signal) => runAgentTurn({
       agentId: target,
       message,
+      signal,
       onDelta: (partial) => emit("chat", { state: "delta", message: { role: "assistant", content: partial } }),
-    })))
+    }))
       .then((text) => {
         const response = typeof text === "string" ? text : "";
         emit("chat", { state: "final", stopReason: "end_turn", message: { role: "assistant", content: response } });
