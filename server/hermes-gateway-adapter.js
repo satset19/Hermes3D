@@ -237,11 +237,17 @@ const agentRegistry = new Map([
 const activeSendEventFns = new Set();
 
 // ---------------------------------------------------------------------------
-// Disk persistence for conversation history
+// Disk persistence for conversation history, agent registry & brain files
 // ---------------------------------------------------------------------------
 
 const HISTORY_FILE = path.join(HOME, ".hermes", "hermes3d-history.json");
+const AGENT_FILES_FILE = path.join(HOME, ".hermes", "hermes3d-agent-files.json");
+const AGENTS_FILE = path.join(HOME, ".hermes", "hermes3d-agents.json");
+const SESSIONS_FILE = path.join(HOME, ".hermes", "hermes3d-sessions.json");
 let persistDebounceTimer = null;
+let persistAgentFilesTimer = null;
+let persistAgentsTimer = null;
+let persistSessionsTimer = null;
 
 function loadHistoryFromDisk() {
   try {
@@ -274,6 +280,244 @@ function saveHistoryToDisk() {
       console.warn("[hermes-adapter] Could not save history:", sanitizeErrorMessage(err));
     }
   }, 500);
+}
+
+function saveAgentFilesToDisk() {
+  if (persistAgentFilesTimer) clearTimeout(persistAgentFilesTimer);
+  persistAgentFilesTimer = setTimeout(() => {
+    try {
+      const data = {};
+      for (const [k, v] of agentFiles.entries()) {
+        data[k] = v;
+      }
+      fs.mkdirSync(path.dirname(AGENT_FILES_FILE), { recursive: true });
+      fs.writeFileSync(AGENT_FILES_FILE, JSON.stringify(data, null, 2), "utf8");
+    } catch (err) {
+      console.warn("[hermes-adapter] Could not save agent files:", sanitizeErrorMessage(err));
+    }
+  }, 300);
+}
+
+function saveAgentsToDisk() {
+  if (persistAgentsTimer) clearTimeout(persistAgentsTimer);
+  persistAgentsTimer = setTimeout(() => {
+    try {
+      const data = [];
+      for (const agent of agentRegistry.values()) {
+        data.push(agent);
+      }
+      fs.mkdirSync(path.dirname(AGENTS_FILE), { recursive: true });
+      fs.writeFileSync(AGENTS_FILE, JSON.stringify(data, null, 2), "utf8");
+    } catch (err) {
+      console.warn("[hermes-adapter] Could not save agents:", sanitizeErrorMessage(err));
+    }
+  }, 300);
+}
+
+function saveSessionsToDisk() {
+  if (persistSessionsTimer) clearTimeout(persistSessionsTimer);
+  persistSessionsTimer = setTimeout(() => {
+    try {
+      const data = {};
+      for (const [k, v] of sessionSettings.entries()) {
+        data[k] = v;
+      }
+      fs.mkdirSync(path.dirname(SESSIONS_FILE), { recursive: true });
+      fs.writeFileSync(SESSIONS_FILE, JSON.stringify(data, null, 2), "utf8");
+    } catch (err) {
+      console.warn("[hermes-adapter] Could not save session settings:", sanitizeErrorMessage(err));
+    }
+  }, 300);
+}
+
+function getAgentWorkspace(agentId) {
+  const aid = agentId || AGENT_ID;
+  const agent = agentRegistry.get(aid);
+  if (agent && agent.workspace) return agent.workspace;
+  const slug = aid.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  return path.join(HOME, ".hermes", `workspace-${slug}`);
+}
+
+function readAgentBrainFile(agentId, fileName) {
+  const aid = agentId || AGENT_ID;
+  const ws = getAgentWorkspace(aid);
+  const filePath = path.join(ws, fileName);
+  const key = `${aid}/${fileName}`;
+
+  if (fs.existsSync(filePath)) {
+    try {
+      const content = fs.readFileSync(filePath, "utf8");
+      agentFiles.set(key, content);
+      return { content, path: filePath, workspace: ws, missing: false };
+    } catch (err) {
+      console.warn(`[hermes-adapter] Error reading ${filePath}:`, sanitizeErrorMessage(err));
+    }
+  }
+
+  if (agentFiles.has(key)) {
+    const content = agentFiles.get(key) || "";
+    return { content, path: filePath, workspace: ws, missing: false };
+  }
+
+  return { content: "", path: filePath, workspace: ws, missing: true };
+}
+
+function writeAgentBrainFileToDisk(agentId, fileName, content) {
+  const aid = agentId || AGENT_ID;
+  const ws = getAgentWorkspace(aid);
+  const filePath = path.join(ws, fileName);
+  const key = `${aid}/${fileName}`;
+  const safeContent = typeof content === "string" ? content : "";
+
+  agentFiles.set(key, safeContent);
+
+  try {
+    fs.mkdirSync(ws, { recursive: true });
+    fs.writeFileSync(filePath, safeContent, "utf8");
+  } catch (err) {
+    console.warn(`[hermes-adapter] Error writing ${filePath}:`, sanitizeErrorMessage(err));
+  }
+
+  saveAgentFilesToDisk();
+  updateAgentSystemPromptFromFiles(aid);
+}
+
+function updateAgentSystemPromptFromFiles(agentId) {
+  const aid = agentId || AGENT_ID;
+  const agent = agentRegistry.get(aid);
+  if (!agent) return;
+
+  const parts = [];
+  const idKey = `${aid}/IDENTITY.md`;
+  const soulKey = `${aid}/SOUL.md`;
+  const agentsKey = `${aid}/AGENTS.md`;
+  const toolsKey = `${aid}/TOOLS.md`;
+  const userKey = `${aid}/USER.md`;
+  const memKey = `${aid}/MEMORY.md`;
+
+  if (agentFiles.has(idKey)) parts.push(agentFiles.get(idKey));
+  if (agentFiles.has(soulKey)) parts.push(agentFiles.get(soulKey));
+  if (agentFiles.has(agentsKey)) parts.push(agentFiles.get(agentsKey));
+  if (agentFiles.has(toolsKey)) parts.push(agentFiles.get(toolsKey));
+  if (agentFiles.has(userKey)) parts.push(agentFiles.get(userKey));
+  if (agentFiles.has(memKey)) parts.push(agentFiles.get(memKey));
+
+  if (parts.length > 0) {
+    agent.systemPrompt = parts.join("\n\n").trim();
+  }
+}
+
+function seedDefaultOrchestratorBrainFiles() {
+  const ws = getAgentWorkspace(AGENT_ID);
+  fs.mkdirSync(ws, { recursive: true });
+
+  const defaults = {
+    "IDENTITY.md": `# Identity\n\n- Name: Hermes\n- Creature: AI Orchestrator\n- Vibe: Direct, concise, capable\n- Emoji: ⚡\n`,
+    "SOUL.md": fs.existsSync(path.join(HOME, ".hermes", "SOUL.md"))
+      ? fs.readFileSync(path.join(HOME, ".hermes", "SOUL.md"), "utf8")
+      : `You are Hermes Agent, built by Nous Research. Be direct: match the length of your reply to the weight of the ask — a one-line question gets a one-line answer, and finished work gets a short report of what changed, what's verified, and what's left, never a replay of the process. No filler, plain claims over adjectives. Depth is earned.\n`,
+    "AGENTS.md": fs.existsSync(path.join(HOME, "AGENTS.md"))
+      ? fs.readFileSync(path.join(HOME, "AGENTS.md"), "utf8")
+      : `# Operating Instructions\n\nPrioritize architectural navigation and knowledge graph before broad codebase scanning.\nAlways verify changes with real execution before concluding work.\n`,
+    "USER.md": `# User Profile\n\n- User: Sat (Admin/Owner)\n- Timezone: Asia/Jakarta (WIB, UTC+07:00)\n- Language: Indonesian\n- Style: Direct, final, clean, no emojis.\n`,
+    "TOOLS.md": `# Tool Conventions\n\n- Autonomous tool execution to complete requested tasks.\n- Verify all outputs and handles before reporting.\n`,
+    "HEARTBEAT.md": `# Heartbeat Checklist\n\n- Check health of Hermes gateway and adapter.\n- Check system status and memory.\n`,
+    "MEMORY.md": `# Memory\n\nDurable facts, conventions, and system environment notes.\n`,
+  };
+
+  for (const [name, defaultContent] of Object.entries(defaults)) {
+    const filePath = path.join(ws, name);
+    const key = `${AGENT_ID}/${name}`;
+    if (!fs.existsSync(filePath)) {
+      try {
+        fs.writeFileSync(filePath, defaultContent, "utf8");
+      } catch (err) {
+        console.warn(`[hermes-adapter] Could not seed ${filePath}:`, sanitizeErrorMessage(err));
+      }
+      agentFiles.set(key, defaultContent);
+    } else {
+      try {
+        const existing = fs.readFileSync(filePath, "utf8");
+        agentFiles.set(key, existing);
+      } catch {}
+    }
+  }
+}
+
+function loadBrainSettingsFromDisk() {
+  // 1. Agents
+  try {
+    if (fs.existsSync(AGENTS_FILE)) {
+      const raw = fs.readFileSync(AGENTS_FILE, "utf8");
+      const list = JSON.parse(raw);
+      if (Array.isArray(list)) {
+        for (const a of list) {
+          if (a && a.id) agentRegistry.set(a.id, a);
+        }
+        console.log(`[hermes-adapter] Loaded registry for ${agentRegistry.size} agent(s).`);
+      }
+    }
+  } catch (err) {
+    console.warn("[hermes-adapter] Could not load agents:", sanitizeErrorMessage(err));
+  }
+
+  // 2. Sessions
+  try {
+    if (fs.existsSync(SESSIONS_FILE)) {
+      const raw = fs.readFileSync(SESSIONS_FILE, "utf8");
+      const data = JSON.parse(raw);
+      if (data && typeof data === "object") {
+        for (const [k, v] of Object.entries(data)) {
+          sessionSettings.set(k, v);
+        }
+        console.log(`[hermes-adapter] Loaded metadata for ${sessionSettings.size} session(s).`);
+      }
+    }
+  } catch (err) {
+    console.warn("[hermes-adapter] Could not load session settings:", sanitizeErrorMessage(err));
+  }
+
+  // 3. Agent files cache
+  try {
+    if (fs.existsSync(AGENT_FILES_FILE)) {
+      const raw = fs.readFileSync(AGENT_FILES_FILE, "utf8");
+      const data = JSON.parse(raw);
+      if (data && typeof data === "object") {
+        for (const [k, v] of Object.entries(data)) {
+          agentFiles.set(k, v);
+        }
+      }
+    }
+  } catch (err) {
+    console.warn("[hermes-adapter] Could not load agent files:", sanitizeErrorMessage(err));
+  }
+
+  // 4. Read from all agent workspaces on disk
+  for (const [aid, agent] of agentRegistry.entries()) {
+    const ws = agent.workspace || path.join(HOME, ".hermes", `workspace-${aid}`);
+    try {
+      fs.mkdirSync(ws, { recursive: true });
+      if (fs.existsSync(ws)) {
+        const files = fs.readdirSync(ws);
+        for (const f of files) {
+          if (f.endsWith(".md")) {
+            const fullPath = path.join(ws, f);
+            try {
+              const c = fs.readFileSync(fullPath, "utf8");
+              agentFiles.set(`${aid}/${f}`, c);
+            } catch {}
+          }
+        }
+      }
+    } catch (err) {
+      console.warn(`[hermes-adapter] Could not inspect workspace for ${aid}:`, sanitizeErrorMessage(err));
+    }
+  }
+
+  // 5. Seed default orchestrator brain files
+  seedDefaultOrchestratorBrainFiles();
+  updateAgentSystemPromptFromFiles(AGENT_ID);
+  console.log(`[hermes-adapter] Loaded ${agentFiles.size} agent brain file(s) across local workspaces.`);
 }
 
 function getHistory(sessionKey) {
@@ -582,6 +826,7 @@ async function execSpawnAgent(args) {
     id: newId, name, workspace: `${HOME}/.hermes/workspace-${slug}`,
     role, systemPrompt, settings: { wipe, continuity, model, boundaries },
   });
+  saveAgentsToDisk();
 
   console.log(`[hermes-adapter] Spawned agent: ${name} (${newId})`);
 
@@ -685,6 +930,7 @@ function execConfigureAgent(args) {
     }
   }
   if (typeof args.model === "string" && args.model.trim()) agent.settings.model = args.model.trim();
+  saveAgentsToDisk();
   console.log(`[hermes-adapter] Configured agent: ${agent.name} (${targetId})`);
   broadcastEvent({
     type: "event", event: "presence",
@@ -708,6 +954,7 @@ function execDismissAgent(args) {
   if (!agent) return JSON.stringify({ ok: false, error: `Agent ${targetId} not found` });
   agentRegistry.delete(targetId);
   clearHistory(`agent:${targetId}:${MAIN_KEY}`);
+  saveAgentsToDisk();
   console.log(`[hermes-adapter] Dismissed agent: ${agent.name} (${targetId})`);
   return JSON.stringify({ ok: true, dismissed: targetId });
 }
@@ -851,6 +1098,8 @@ async function handleMethod(method, params, id, sendEvent) {
         role: "", systemPrompt: `You are ${agentName}.`,
         settings: { wipe: false, continuity: true, model: HERMES_MODEL },
       });
+      try { fs.mkdirSync(workspace, { recursive: true }); } catch {}
+      saveAgentsToDisk();
       return resOk(id, { agentId: newId, name: agentName, workspace });
     }
 
@@ -859,6 +1108,7 @@ async function handleMethod(method, params, id, sendEvent) {
       if (delId && delId !== AGENT_ID) {
         agentRegistry.delete(delId);
         clearHistory(`agent:${delId}:${MAIN_KEY}`);
+        saveAgentsToDisk();
       }
       return resOk(id, { ok: true, removedBindings: 0 });
     }
@@ -870,20 +1120,31 @@ async function handleMethod(method, params, id, sendEvent) {
         if (typeof p.name === "string" && p.name.trim()) existing.name = p.name.trim();
         if (typeof p.workspace === "string" && p.workspace.trim()) existing.workspace = p.workspace.trim();
         if (typeof p.role === "string") existing.role = p.role.trim();
+        saveAgentsToDisk();
       }
       return resOk(id, { ok: true, removedBindings: 0 });
     }
 
     case "agents.files.get": {
-      const key = `${p.agentId || AGENT_ID}/${p.name || ""}`;
-      const content = agentFiles.get(key);
-      return resOk(id, { file: content !== undefined ? { content } : { missing: true } });
+      const aid = p.agentId || AGENT_ID;
+      const name = p.name || "";
+      const result = readAgentBrainFile(aid, name);
+      return resOk(id, {
+        workspace: result.workspace,
+        file: {
+          content: result.content,
+          path: result.path,
+          missing: result.missing,
+        },
+      });
     }
 
     case "agents.files.set": {
-      const key = `${p.agentId || AGENT_ID}/${p.name || ""}`;
-      agentFiles.set(key, typeof p.content === "string" ? p.content : "");
-      return resOk(id, {});
+      const aid = p.agentId || AGENT_ID;
+      const name = p.name || "";
+      const content = typeof p.content === "string" ? p.content : "";
+      writeAgentBrainFileToDisk(aid, name, content);
+      return resOk(id, { ok: true });
     }
 
     // --- Config -------------------------------------------------------------
@@ -942,6 +1203,7 @@ async function handleMethod(method, params, id, sendEvent) {
       if (p.execSecurity !== undefined) next.execSecurity = p.execSecurity;
       if (p.execAsk !== undefined) next.execAsk = p.execAsk;
       sessionSettings.set(key, next);
+      saveSessionsToDisk();
       const resolvedModel = await resolveHermesModel(next.model || HERMES_MODEL);
       return resOk(id, { ok: true, key, entry: { thinkingLevel: next.thinkingLevel },
         resolved: { model: resolvedModel, modelProvider: "hermes" } });
@@ -1276,4 +1538,5 @@ function startAdapter() {
 }
 
 loadHistoryFromDisk();
+loadBrainSettingsFromDisk();
 startAdapter();
