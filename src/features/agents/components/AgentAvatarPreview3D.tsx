@@ -2,36 +2,60 @@
 
 import { Environment, OrbitControls } from "@react-three/drei";
 import { Canvas, useFrame } from "@react-three/fiber";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import {
   type AgentAvatarProfile,
   createDefaultAgentAvatarProfile,
 } from "@/lib/avatars/profile";
 import { RunningAvatarLoader } from "@/features/agents/components/RunningAvatarLoader";
+import { getAvatarBodyShape } from "@/lib/avatars/bodyShape";
+import {
+  AvatarFeminineHair,
+  AvatarLashes,
+  AvatarLegClothing,
+  AvatarSkirt,
+} from "@/features/agents/components/avatar3d/AvatarGenderParts";
+import { AgentAvatarGlbModel } from "@/features/agents/components/AgentAvatarGlbModel";
+import { findAnimePresetModelUrl } from "@/lib/avatars/animePresets";
 
 const PreviewFigure = ({
   profile,
-  onFirstFrame,
 }: {
   profile: AgentAvatarProfile;
-  onFirstFrame: () => void;
 }) => {
   const groupRef = useRef<THREE.Group>(null);
-  const reportedReadyRef = useRef(false);
-
-  useEffect(() => {
-    reportedReadyRef.current = false;
-  }, [profile]);
 
   useFrame((state) => {
-    if (!reportedReadyRef.current) {
-      reportedReadyRef.current = true;
-      onFirstFrame();
-    }
     if (!groupRef.current) return;
     groupRef.current.rotation.y = Math.sin(state.clock.elapsedTime * 0.45) * 0.35 + 0.25;
   });
+
+  const presetModelUrl = findAnimePresetModelUrl(profile.imageUrl);
+  if (presetModelUrl) {
+    return (
+      <group ref={groupRef} position={[0, 0, 0]}>
+        <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.01, 0]}>
+          <circleGeometry args={[0.28, 24]} />
+          <meshBasicMaterial color="#000000" transparent opacity={0.16} />
+        </mesh>
+        <Suspense fallback={null}>
+          <AgentAvatarGlbModel
+            modelUrl={presetModelUrl}
+            animationName="idle"
+            targetHeight={1.2}
+            colors={{
+              skin: profile.body.skinTone,
+              hair: profile.hair.color,
+              top: profile.clothing.topColor,
+              bottom: profile.clothing.bottomColor,
+              shoes: profile.clothing.shoesColor,
+            }}
+          />
+        </Suspense>
+      </group>
+    );
+  }
 
   const skin = profile.body.skinTone;
   const topColor = profile.clothing.topColor;
@@ -41,9 +65,11 @@ const PreviewFigure = ({
   const accessoryColor = topColor;
   const sleeveColor = profile.clothing.topStyle === "jacket" ? "#dbe4ff" : topColor;
   const cuffColor = profile.clothing.topStyle === "hoodie" ? "#d1d5db" : sleeveColor;
+  const shape = getAvatarBodyShape(profile.body.gender);
+  const bottomStyle = profile.clothing.bottomStyle;
 
   return (
-    <group ref={groupRef} position={[0, -0.72, 0]} scale={[1.45, 1.45, 1.45]}>
+    <group ref={groupRef} position={[0, 0, 0]} scale={[1.4, 1.4, 1.4]}>
       <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.01, 0]}>
         <circleGeometry args={[0.22, 24]} />
         <meshBasicMaterial color="#000000" transparent opacity={0.16} />
@@ -59,60 +85,29 @@ const PreviewFigure = ({
       ) : null}
 
       <group position={[-0.05, 0.12, 0]}>
-        {profile.clothing.bottomStyle === "shorts" ? (
-          <>
-            <mesh position={[0, 0.03, 0]}>
-              <boxGeometry args={[0.07, 0.08, 0.08]} />
-              <meshLambertMaterial color={bottomColor} />
-            </mesh>
-            <mesh position={[0, -0.045, 0]}>
-              <boxGeometry args={[0.05, 0.06, 0.05]} />
-              <meshLambertMaterial color={skin} />
-            </mesh>
-          </>
-        ) : (
-          <mesh>
-            <boxGeometry args={[0.07, 0.14, 0.08]} />
-            <meshLambertMaterial color={bottomColor} />
-          </mesh>
-        )}
+        <AvatarLegClothing bottomStyle={bottomStyle} bottomColor={bottomColor} skin={skin} />
         <mesh position={[0, -0.09, 0]}>
           <boxGeometry args={[0.07, 0.05, 0.12]} />
           <meshLambertMaterial color={shoeColor} />
         </mesh>
       </group>
       <group position={[0.05, 0.12, 0]}>
-        {profile.clothing.bottomStyle === "shorts" ? (
-          <>
-            <mesh position={[0, 0.03, 0]}>
-              <boxGeometry args={[0.07, 0.08, 0.08]} />
-              <meshLambertMaterial color={bottomColor} />
-            </mesh>
-            <mesh position={[0, -0.045, 0]}>
-              <boxGeometry args={[0.05, 0.06, 0.05]} />
-              <meshLambertMaterial color={skin} />
-            </mesh>
-          </>
-        ) : (
-          <mesh>
-            <boxGeometry args={[0.07, 0.14, 0.08]} />
-            <meshLambertMaterial color={bottomColor} />
-          </mesh>
-        )}
+        <AvatarLegClothing bottomStyle={bottomStyle} bottomColor={bottomColor} skin={skin} />
         <mesh position={[0, -0.09, 0]}>
           <boxGeometry args={[0.07, 0.05, 0.12]} />
           <meshLambertMaterial color={shoeColor} />
         </mesh>
       </group>
+      {bottomStyle === "skirt" ? <AvatarSkirt color={bottomColor} y={0.15} /> : null}
 
       <mesh position={[0, 0.3, 0]}>
-        <boxGeometry args={[0.2, 0.22, 0.1]} />
+        <boxGeometry args={[0.2 * shape.torsoWidthScale, 0.22, 0.1 * shape.torsoDepthScale]} />
         <meshLambertMaterial color={topColor} />
       </mesh>
       {profile.clothing.topStyle === "hoodie" ? (
         <>
           <mesh position={[0, 0.37, -0.045]}>
-            <boxGeometry args={[0.18, 0.1, 0.03]} />
+            <boxGeometry args={[0.18 * shape.torsoWidthScale, 0.1, 0.03]} />
             <meshLambertMaterial color={topColor} />
           </mesh>
           <mesh position={[0, 0.23, 0.056]}>
@@ -124,7 +119,7 @@ const PreviewFigure = ({
       {profile.clothing.topStyle === "jacket" ? (
         <>
           <mesh position={[0, 0.3, 0.056]}>
-            <boxGeometry args={[0.202, 0.23, 0.012]} />
+            <boxGeometry args={[0.202 * shape.torsoWidthScale, 0.23, 0.012]} />
             <meshLambertMaterial color="#1f2937" />
           </mesh>
           <mesh position={[0, 0.3, 0.063]}>
@@ -134,7 +129,7 @@ const PreviewFigure = ({
         </>
       ) : null}
 
-      <group position={[-0.13, 0.3, 0]}>
+      <group position={[-0.13 * shape.armOffsetScale, 0.3, 0]}>
         <mesh position={[0, -0.08, 0]}>
           <boxGeometry args={[0.06, 0.16, 0.06]} />
           <meshLambertMaterial color={sleeveColor} />
@@ -150,7 +145,7 @@ const PreviewFigure = ({
           <meshLambertMaterial color={skin} />
         </mesh>
       </group>
-      <group position={[0.13, 0.3, 0]}>
+      <group position={[0.13 * shape.armOffsetScale, 0.3, 0]}>
         <mesh position={[0, -0.08, 0]}>
           <boxGeometry args={[0.06, 0.16, 0.06]} />
           <meshLambertMaterial color={sleeveColor} />
@@ -226,6 +221,12 @@ const PreviewFigure = ({
           </mesh>
         </>
       ) : null}
+      <AvatarFeminineHair
+        style={profile.hair.style}
+        color={hairColor}
+        headY={0.5}
+        headSize={0.17}
+      />
 
       {profile.accessories.hatStyle === "cap" ? (
         <>
@@ -287,9 +288,10 @@ const PreviewFigure = ({
           </mesh>
         </>
       ) : null}
+      {shape.showLashes ? <AvatarLashes eyeY={0.505} faceZ={0.078} /> : null}
       <mesh position={[0, 0.46, 0.079]}>
         <boxGeometry args={[0.05, 0.014, 0.01]} />
-        <meshBasicMaterial color="#9c4a4a" />
+        <meshBasicMaterial color={shape.mouthColor} />
       </mesh>
     </group>
   );
@@ -306,30 +308,23 @@ export const AgentAvatarPreview3D = ({
     () => profile ?? createDefaultAgentAvatarProfile("preview"),
     [profile]
   );
-  const profileKey = useMemo(() => JSON.stringify(resolvedProfile), [resolvedProfile]);
-  const [readyProfileKey, setReadyProfileKey] = useState<string | null>(null);
-  const isReady = readyProfileKey === profileKey;
-
   return (
     <div className={`relative ${className}`}>
-      {!isReady ? (
-        <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-[#070b16] text-white/70">
-          <RunningAvatarLoader size={26} trackWidth={72} label="Loading avatar..." />
-        </div>
-      ) : null}
-      <Canvas key={profileKey} camera={{ position: [0, 0.7, 2.5], fov: 34 }}>
-        <color attach="background" args={["#070b16"]} />
+      <Canvas
+        gl={{ preserveDrawingBuffer: true, alpha: true }}
+        camera={{ position: [0, 0.6, 3.2], fov: 34 }}
+      >
         <ambientLight intensity={1.4} />
         <directionalLight position={[3, 4, 5]} intensity={2.4} />
         <directionalLight position={[-4, 2, 3]} intensity={0.9} color="#89a6ff" />
-        <PreviewFigure
-          profile={resolvedProfile}
-          onFirstFrame={() => {
-            setReadyProfileKey(profileKey);
-          }}
+        <PreviewFigure profile={resolvedProfile} />
+        <OrbitControls
+          target={[0, 0.6, 0]}
+          enablePan={false}
+          enableZoom={false}
+          maxPolarAngle={1.8}
+          minPolarAngle={1.1}
         />
-        <Environment preset="city" />
-        <OrbitControls enablePan={false} enableZoom={false} maxPolarAngle={1.8} minPolarAngle={1.1} />
       </Canvas>
     </div>
   );

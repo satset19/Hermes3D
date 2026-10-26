@@ -23,6 +23,7 @@ export const AgentAvatar = ({
   isSelected = false,
 }: AgentAvatarProps) => {
   const src = useMemo(() => {
+    if (avatarProfile?.imageUrl) return avatarProfile.imageUrl;
     if (avatarProfile) return buildAgentAvatarPortraitDataUrl(avatarProfile);
     const trimmed = avatarUrl?.trim();
     if (trimmed) return trimmed;
