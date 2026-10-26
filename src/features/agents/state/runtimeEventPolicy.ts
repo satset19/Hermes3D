@@ -73,14 +73,13 @@ export const decideRuntimeChatEvent = (
       return [{ kind: "clearRunTracking", runId }];
     }
     if (
+      !runId &&
       !activeRunId &&
       input.agentStatus !== "running" &&
       role !== "user" &&
       role !== "system"
     ) {
-      return runId
-        ? [{ kind: "clearRunTracking", runId }]
-        : [{ kind: "ignore", reason: "inactive-agent-delta" }];
+      return [{ kind: "ignore", reason: "inactive-agent-delta" }];
     }
     if (role === "user" || role === "system") {
       return [];

@@ -44,6 +44,43 @@ describe("runtime event policy", () => {
     expect(intents).toEqual([{ kind: "clearRunTracking", runId: "run-stale" }]);
   });
 
+  it("adopts_assistant_delta_from_a_run_started_elsewhere", () => {
+    const intents = decideRuntimeChatEvent({
+      agentId: "agent-1",
+      state: "delta",
+      runId: "team-run",
+      role: "assistant",
+      activeRunId: null,
+      agentStatus: "idle",
+      now: 1000,
+      agentRunStartedAt: null,
+      nextThinking: null,
+      nextText: "working on it",
+      hasThinkingStarted: false,
+      isClosedRun: false,
+      isStaleTerminal: false,
+      shouldRequestHistoryRefresh: false,
+      shouldUpdateLastResult: false,
+      shouldSetRunIdle: false,
+      shouldSetRunError: false,
+      lastResultText: null,
+      assistantCompletionAt: null,
+      shouldQueueLatestUpdate: false,
+      latestUpdateMessage: null,
+    });
+
+    expect(findIntent(intents, "queueLivePatch")).toEqual({
+      kind: "queueLivePatch",
+      agentId: "agent-1",
+      patch: {
+        streamText: "working on it",
+        runId: "team-run",
+        status: "running",
+        runStartedAt: 1000,
+      },
+    });
+  });
+
   it("returns_live_patch_intent_for_assistant_delta", () => {
     const intents = decideRuntimeChatEvent({
       agentId: "agent-1",

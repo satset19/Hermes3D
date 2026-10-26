@@ -8,6 +8,7 @@ import {
   type ChatEventPayload,
 } from "@/features/agents/state/runtimeEventBridge";
 import { decideSummaryRefreshEvent } from "@/features/agents/state/runtimeEventPolicy";
+import { isInferredRunId } from "@/features/agents/state/inferredRunId";
 import { isClosedRun } from "@/features/agents/state/runtimeTerminalWorkflow";
 import {
   createRuntimeEventCoordinatorState,
@@ -287,7 +288,9 @@ export function createGatewayRuntimeEventHandler(
     const agentId = findAgentBySessionKey(agentsSnapshot, payload.sessionKey);
     if (!agentId) return;
     const agent = agentsSnapshot.find((entry) => entry.agentId === agentId);
-    const activeRunId = agent?.runId?.trim() ?? "";
+    const rawActiveRunId = agent?.runId?.trim() ?? "";
+    // A placeholder runId from history inference must not block the real run's frames.
+    const activeRunId = isInferredRunId(rawActiveRunId) ? "" : rawActiveRunId;
     const role = resolveRole(payload.message);
     const nowMs = now();
 
@@ -295,7 +298,9 @@ export function createGatewayRuntimeEventHandler(
       clearRunTracking(payload.runId);
       return;
     }
+    // Runs started outside this browser (team assignments) carry a runId: adopt them.
     if (
+      !payload.runId &&
       !activeRunId &&
       agent?.status !== "running" &&
       payload.state === "delta" &&

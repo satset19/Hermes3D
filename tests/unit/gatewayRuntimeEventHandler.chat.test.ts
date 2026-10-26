@@ -139,6 +139,70 @@ describe("gateway runtime event handler (chat)", () => {
     expect(queueLivePatch).not.toHaveBeenCalled();
   });
 
+  const makeHandler = (agents: AgentState[]) => {
+    const queueLivePatch = vi.fn();
+    const handler = createGatewayRuntimeEventHandler({
+      getStatus: () => "connected",
+      getAgents: () => agents,
+      dispatch: vi.fn(),
+      queueLivePatch,
+      clearPendingLivePatch: vi.fn(),
+      now: () => 1000,
+      loadSummarySnapshot: vi.fn(async () => {}),
+      requestHistoryRefresh: vi.fn(async () => {}),
+      refreshHeartbeatLatestUpdate: vi.fn(),
+      bumpHeartbeatTick: vi.fn(),
+      setTimeout: (fn, ms) => setTimeout(fn, ms) as unknown as number,
+      clearTimeout: (id) => clearTimeout(id as unknown as NodeJS.Timeout),
+      isDisconnectLikeError: () => false,
+      logWarn: vi.fn(),
+      updateSpecialLatestUpdate: vi.fn(),
+    });
+    return { handler, queueLivePatch };
+  };
+
+  it("streams a run started outside this browser (team task joined mid-run)", () => {
+    const agents = [createAgent({ status: "idle", runId: null })];
+    const { handler, queueLivePatch } = makeHandler(agents);
+
+    handler.handleEvent({
+      type: "event",
+      event: "chat",
+      payload: {
+        runId: "team-run",
+        sessionKey: agents[0]!.sessionKey,
+        state: "delta",
+        message: { role: "assistant", content: "Working on it" },
+      },
+    });
+
+    expect(queueLivePatch).toHaveBeenCalledWith(
+      "agent-1",
+      expect.objectContaining({ streamText: "Working on it", status: "running", runId: "team-run" })
+    );
+  });
+
+  it("lets a real run replace a placeholder inferred runId", () => {
+    const agents = [createAgent({ status: "running", runId: "inferred-agent-1" })];
+    const { handler, queueLivePatch } = makeHandler(agents);
+
+    handler.handleEvent({
+      type: "event",
+      event: "chat",
+      payload: {
+        runId: "team-run",
+        sessionKey: agents[0]!.sessionKey,
+        state: "delta",
+        message: { role: "assistant", content: "Live" },
+      },
+    });
+
+    expect(queueLivePatch).toHaveBeenCalledWith(
+      "agent-1",
+      expect.objectContaining({ streamText: "Live", runId: "team-run" })
+    );
+  });
+
   it("ignores stale delta chat events for non-active runIds", () => {
     const agents = [
       createAgent({
