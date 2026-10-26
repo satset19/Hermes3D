@@ -26,6 +26,7 @@ const https = require("https");
 const fs = require("fs");
 const path = require("path");
 const { WebSocketServer } = require("ws");
+const { buildTeamToolGuide, createTeamManager, createTeamHttpHandler } = require("./hermes3d-team");
 
 function loadDotenvFile(filePath) {
   if (!fs.existsSync(filePath)) return;
@@ -61,6 +62,7 @@ const HERMES_API_KEY = process.env.HERMES_API_KEY || "";
 const ADAPTER_PORT = parseInt(process.env.HERMES_ADAPTER_PORT || "18789", 10);
 const HERMES_MODEL = process.env.HERMES_MODEL || "hermes";
 const HERMES_AGENT_NAME = process.env.HERMES_AGENT_NAME || "Hermes";
+const HERMES3D_TEAM_TOKEN = process.env.HERMES3D_TEAM_TOKEN || "";
 const HOME = process.env.HOME || "/tmp";
 
 const AGENT_ID = "hermes";
@@ -1121,6 +1123,45 @@ async function execSubagentSpawn(args, callerAgentId) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Team assignment (reached from Hermes via the hermes3d MCP server -> /team/*)
+// ---------------------------------------------------------------------------
+
+function buildSystemMessages(agentId, agent) {
+  const content = [agent?.systemPrompt || "", buildTeamToolGuide(agentId)].filter(Boolean).join("\n\n");
+  return [{ role: "system", content }];
+}
+
+async function runAgentTurn({ agentId, message, onDelta }) {
+  const agent = agentRegistry.get(agentId);
+  if (!agent) throw new Error(`Agent ${agentId} not found`);
+  const sessionKey = `agent:${agentId}:${MAIN_KEY}`;
+  const history = getHistory(sessionKey);
+  const model = (sessionSettings.get(sessionKey) || {}).model || agent.settings?.model || HERMES_MODEL;
+  const messages = [
+    ...buildSystemMessages(agentId, agent),
+    ...(agent.settings?.wipe ? [] : history),
+    { role: "user", content: message },
+  ];
+  // The Hermes API runs its own tool loop server-side and ignores client tools: one call is the whole run.
+  const { textContent } = await streamOneTurn(messages, model, [], onDelta, null);
+  if (agent.settings?.continuity !== false) {
+    history.push({ role: "user", content: message });
+    history.push({ role: "assistant", content: textContent });
+    saveHistoryToDisk();
+  }
+  return textContent;
+}
+
+const teamManager = createTeamManager({
+  getAgent: (id) => agentRegistry.get(id) || null,
+  listAgents: () => [...agentRegistry.values()],
+  runAgentTurn,
+  broadcast: broadcastEvent,
+  randomId,
+});
+const handleTeamHttp = createTeamHttpHandler({ token: HERMES3D_TEAM_TOKEN, manager: teamManager });
+
 async function executeToolCall(tc, callerAgentId, sendEvent) {
   console.log(`[hermes-adapter] Tool call by ${callerAgentId}: ${tc.name}`, JSON.stringify(tc.args).slice(0, 120));
   switch (tc.name) {
@@ -1141,7 +1182,7 @@ async function executeToolCall(tc, callerAgentId, sendEvent) {
 
 async function runAgenticLoop({ sessionKey, agentId, userMessage, model, tools, emitDelta, abortCheck, sendEvent }) {
   const agent = agentRegistry.get(agentId);
-  const systemMsg = agent?.systemPrompt ? [{ role: "system", content: agent.systemPrompt }] : [];
+  const systemMsg = buildSystemMessages(agentId, agent);
   const history = getHistory(sessionKey);
   const contextHistory = (agent?.settings?.wipe) ? [] : [...history];
   let messages = [...systemMsg, ...contextHistory, { role: "user", content: userMessage }];
@@ -1376,6 +1417,7 @@ async function handleMethod(method, params, id, sendEvent) {
         agentId: sessionAgentId,
         abort() { aborted = true; },
       });
+      teamManager.markBusy(sessionAgentId, runId);
 
       setImmediate(async () => {
         const model = (sessionSettings.get(sessionKey) || {}).model
@@ -1415,6 +1457,7 @@ async function handleMethod(method, params, id, sendEvent) {
           else emitChat("aborted", {});
         } finally {
           activeRuns.delete(runId);
+          teamManager.clearBusy(sessionAgentId, runId);
         }
       });
 
@@ -1516,7 +1559,7 @@ async function handleMethod(method, params, id, sendEvent) {
       }
 
     case "tasks.list":
-      return resOk(id, { tasks: [] });
+      return resOk(id, { tasks: teamManager.listTasks() });
 
     // --- Cron jobs ----------------------------------------------------------
 
@@ -1587,7 +1630,17 @@ async function handleMethod(method, params, id, sendEvent) {
 // ---------------------------------------------------------------------------
 
 function startAdapter() {
-  const httpServer = http.createServer((req, res) => {
+  const httpServer = http.createServer(async (req, res) => {
+    try {
+      if (await handleTeamHttp(req, res)) return;
+    } catch (err) {
+      console.error("[hermes-adapter] team http error:", sanitizeErrorMessage(err));
+      if (!res.headersSent) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end('{"ok":false,"error":"internal"}');
+      }
+      return;
+    }
     res.writeHead(200, { "Content-Type": "text/plain" });
     res.end("Hermes Gateway Adapter – OK\n");
   });
@@ -1675,6 +1728,7 @@ function startAdapter() {
     console.log(`[hermes-adapter] ✓ Forwarding to Hermes API at ${HERMES_API_URL}`);
     console.log(`[hermes-adapter] ✓ Model: ${HERMES_MODEL}`);
     console.log(`[hermes-adapter] ✓ Multi-agent orchestration: ENABLED`);
+    console.log(`[hermes-adapter] ✓ Team API: ${HERMES3D_TEAM_TOKEN ? "enabled" : "DISABLED (HERMES3D_TEAM_TOKEN unset)"}`);
     console.log(`\nOpen Hermes3D → ws://localhost:${ADAPTER_PORT}\n`);
   });
 
