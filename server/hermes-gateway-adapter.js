@@ -83,6 +83,7 @@ You have tools to build and manage your team autonomously:
 - **configure_agent**: Update an agent's name, role/title, instructions, or settings.
 - **dismiss_agent**: Remove an agent from the team.
 - **read_agent_context**: Read the recent conversation history of another agent to understand what they are currently working on, what they have already done, or what their status is. Use this for coordination — before delegating a task, check if the agent already has relevant context.
+- **subagent_spawn**: Spawn up to 10 subagents in parallel to perform in-depth research, specialized analysis, or execution on complex subtasks.
 
 When given a goal:
 1. Analyse what specialist roles are needed.
@@ -98,7 +99,35 @@ Be concise in your responses to the user; do the heavy lifting via tool calls.`;
 // Team management tools definition (OpenAI tool-calling format)
 // ---------------------------------------------------------------------------
 
+const SUBAGENT_SPAWN_TOOL = {
+  type: "function",
+  function: {
+    name: "subagent_spawn",
+    description: "Spawn up to 10 sub-agents in parallel to perform in-depth research, specialized analysis, or task execution. Returns consolidated findings.",
+    parameters: {
+      type: "object",
+      required: ["tasks"],
+      properties: {
+        tasks: {
+          type: "array",
+          description: "List of research or execution tasks for sub-agents (maximum 10).",
+          items: {
+            type: "object",
+            required: ["goal"],
+            properties: {
+              name: { type: "string", description: "Role or specialty of the sub-agent (e.g. 'Security Analyst', 'Performance Researcher')" },
+              goal: { type: "string", description: "Specific research question, analysis objective, or task instructions" },
+              context: { type: "string", description: "Background context, technical specs, or constraints" },
+            },
+          },
+        },
+      },
+    },
+  },
+};
+
 const TEAM_TOOLS = [
+  SUBAGENT_SPAWN_TOOL,
   {
     type: "function",
     function: {
@@ -194,6 +223,13 @@ const TEAM_TOOLS = [
     },
   },
 ];
+
+const SPECIALIST_TOOLS = [
+  SUBAGENT_SPAWN_TOOL,
+  TEAM_TOOLS.find((t) => t.function.name === "delegate_task"),
+  TEAM_TOOLS.find((t) => t.function.name === "read_agent_context"),
+  TEAM_TOOLS.find((t) => t.function.name === "list_team"),
+].filter(Boolean);
 
 // ---------------------------------------------------------------------------
 // In-memory state
@@ -876,11 +912,38 @@ async function execDelegateTask(args) {
 
   let responseText = "";
   try {
-    const result = await streamOneTurn(messages, model, [], (partial) => {
-      responseText = partial;
-      emitSub("delta", { message: { role: "assistant", content: partial } });
-    }, null);
-    responseText = result.textContent;
+    let round = 0;
+    while (round < 4) {
+      round++;
+      const result = await streamOneTurn(messages, model, [SUBAGENT_SPAWN_TOOL], (partial) => {
+        responseText = partial;
+        emitSub("delta", { message: { role: "assistant", content: partial } });
+      }, null);
+
+      if (result.finishReason === "tool_calls" && result.toolCalls.length > 0) {
+        messages.push({
+          role: "assistant",
+          content: result.textContent || null,
+          tool_calls: result.toolCalls.map((tc) => ({
+            id: tc.id,
+            type: "function",
+            function: { name: tc.name, arguments: JSON.stringify(tc.args) },
+          })),
+        });
+
+        const toolResults = await Promise.all(
+          result.toolCalls.map(async (tc) => {
+            const toolRes = await executeToolCall(tc, targetId, broadcastEvent);
+            return { role: "tool", tool_call_id: tc.id, content: toolRes };
+          })
+        );
+        messages.push(...toolResults);
+        continue;
+      }
+
+      responseText = result.textContent;
+      break;
+    }
 
     // Persist to sub-agent history
     if (agent.settings.continuity !== false) {
@@ -986,9 +1049,82 @@ function execReadAgentContext(args) {
   });
 }
 
-async function executeToolCall(tc, sendEvent) {
-  console.log(`[hermes-adapter] Tool call: ${tc.name}`, JSON.stringify(tc.args).slice(0, 120));
+async function execSubagentSpawn(args, callerAgentId) {
+  let rawTasks = [];
+  if (Array.isArray(args?.tasks)) {
+    rawTasks = args.tasks;
+  } else if (typeof args?.tasks === "string") {
+    rawTasks = [{ goal: args.tasks }];
+  } else if (typeof args?.task === "string") {
+    rawTasks = [{ goal: args.task }];
+  } else if (typeof args?.goal === "string") {
+    rawTasks = [{ goal: args.goal }];
+  }
+
+  // Cap at 10 subagents per call
+  const tasks = rawTasks.slice(0, 10).filter((t) => t && (t.goal || t.task));
+
+  if (tasks.length === 0) {
+    return JSON.stringify({
+      ok: false,
+      error: "No valid tasks provided. Must provide an array of tasks with 'goal' (up to 10).",
+    });
+  }
+
+  const caller = agentRegistry.get(callerAgentId) || { name: callerAgentId || "Agent" };
+  console.log(`[hermes-adapter] ${caller.name} (${callerAgentId}) spawning ${tasks.length} subagent(s)...`);
+
+  const results = await Promise.all(
+    tasks.map(async (task, idx) => {
+      const name = (typeof task.name === "string" && task.name.trim())
+        ? task.name.trim()
+        : `Researcher ${idx + 1}`;
+      const goal = typeof task.goal === "string" ? task.goal.trim() : (task.task || "");
+      const context = typeof task.context === "string" ? task.context.trim() : "";
+
+      const subagentPrompt = [
+        `You are ${name}, an autonomous research and task execution subagent spawned by ${caller.name} in Hermes3D.`,
+        `Your primary assignment: ${goal}`,
+        context ? `Context & Constraints:\n${context}` : "",
+        "Be direct, factual, and analytical. Produce clear, actionable conclusions backed by evidence. Do not include conversational filler.",
+      ].filter(Boolean).join("\n\n");
+
+      const messages = [
+        { role: "system", content: subagentPrompt },
+        { role: "user", content: `Execute this task thoroughly and return your findings: ${goal}` },
+      ];
+
+      try {
+        const turn = await completeOneTurn(messages, HERMES_MODEL, []);
+        return {
+          name,
+          goal,
+          status: "completed",
+          findings: turn.textContent.trim(),
+        };
+      } catch (err) {
+        return {
+          name,
+          goal,
+          status: "failed",
+          error: sanitizeErrorMessage(err),
+        };
+      }
+    })
+  );
+
+  return JSON.stringify({
+    ok: true,
+    caller: caller.name,
+    spawned_count: results.length,
+    results,
+  });
+}
+
+async function executeToolCall(tc, callerAgentId, sendEvent) {
+  console.log(`[hermes-adapter] Tool call by ${callerAgentId}: ${tc.name}`, JSON.stringify(tc.args).slice(0, 120));
   switch (tc.name) {
+    case "subagent_spawn":       return execSubagentSpawn(tc.args, callerAgentId);
     case "spawn_agent":          return execSpawnAgent(tc.args, sendEvent);
     case "delegate_task":        return execDelegateTask(tc.args, sendEvent);
     case "list_team":            return execListTeam();
@@ -1038,7 +1174,7 @@ async function runAgenticLoop({ sessionKey, agentId, userMessage, model, tools, 
       // Execute all tool calls and collect results
       const toolResults = await Promise.all(
         toolCalls.map(async (tc) => {
-          const result = await executeToolCall(tc, sendEvent);
+          const result = await executeToolCall(tc, agentId, sendEvent);
           return { role: "tool", tool_call_id: tc.id, content: result };
         })
       );
@@ -1252,8 +1388,8 @@ async function handleMethod(method, params, id, sendEvent) {
         };
 
         try {
-          // Only the orchestrator gets team management tools
-          const tools = isOrchestrator ? TEAM_TOOLS : [];
+          // Tool availability: every agent gets subagent_spawn; orchestrator gets full team tools
+          const tools = isOrchestrator ? TEAM_TOOLS : SPECIALIST_TOOLS;
 
           const finalText = await runAgenticLoop({
             sessionKey, agentId: sessionAgentId, userMessage,
