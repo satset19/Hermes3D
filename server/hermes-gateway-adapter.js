@@ -27,6 +27,7 @@ const fs = require("fs");
 const path = require("path");
 const { WebSocketServer } = require("ws");
 const { buildTeamToolGuide, createTeamManager, createTeamHttpHandler } = require("./hermes3d-team");
+const { createRunAgentTurn, closeDanglingTurns } = require("./hermes3d-team-turn");
 
 function loadDotenvFile(filePath) {
   if (!fs.existsSync(filePath)) return;
@@ -587,7 +588,7 @@ function redactSecrets(value) {
 // Hermes HTTP API helpers
 // ---------------------------------------------------------------------------
 
-function hermesPost(path, body) {
+function hermesPost(path, body, signal) {
   return new Promise((resolve, reject) => {
     const urlStr = HERMES_API_URL + path;
     let url;
@@ -598,7 +599,7 @@ function hermesPost(path, body) {
     if (HERMES_API_KEY) headers["Authorization"] = `Bearer ${HERMES_API_KEY}`;
     const req = transport.request(
       { hostname: url.hostname, port: url.port ? parseInt(url.port, 10) : (url.protocol === "https:" ? 443 : 80),
-        path: url.pathname + (url.search || ""), method: "POST", headers },
+        path: url.pathname + (url.search || ""), method: "POST", headers, ...(signal ? { signal } : {}) },
       resolve
     );
     req.on("error", reject);
@@ -756,13 +757,13 @@ async function completeOneTurn(messages, model, tools) {
  * Stream one LLM turn.
  * @returns {{ textContent: string, toolCalls: Array<{id,name,args}>, finishReason: string }}
  */
-async function streamOneTurn(messages, model, tools, onTextDelta, abortCheck) {
+async function streamOneTurn(messages, model, tools, onTextDelta, abortCheck, signal) {
   const body = { model, messages, stream: true };
   if (tools && tools.length > 0) { body.tools = tools; body.tool_choice = "auto"; }
 
   const resolvedModel = await resolveHermesModel(model);
   body.model = resolvedModel;
-  const res = await hermesPost("/v1/chat/completions", body);
+  const res = await hermesPost("/v1/chat/completions", body, signal);
   if (res.statusCode >= 400) {
     res.resume();
     throw new Error(`Hermes API HTTP ${res.statusCode}`);
@@ -775,6 +776,14 @@ async function streamOneTurn(messages, model, tools, onTextDelta, abortCheck) {
   let buffer = "";
 
   await new Promise((resolve, reject) => {
+    // destroy() emits "aborted"+"close" but never "end"; settle on close so callers are not left hanging.
+    const stop = () => { res.destroy(); resolve(); };
+    if (signal) {
+      if (signal.aborted) { stop(); return; }
+      signal.addEventListener("abort", stop, { once: true });
+      res.on("close", () => signal.removeEventListener("abort", stop));
+    }
+    res.on("close", resolve);
     res.on("data", (chunk) => {
       if (abortCheck && abortCheck()) { res.destroy(); return; }
       buffer += chunk.toString("utf8");
@@ -819,6 +828,8 @@ async function streamOneTurn(messages, model, tools, onTextDelta, abortCheck) {
     try { args = JSON.parse(tc.argsStr); } catch { args = { _raw: tc.argsStr }; }
     return { id: tc.id, name: tc.name, args };
   });
+
+  if (signal && signal.aborted) return { textContent, toolCalls, finishReason: "aborted" };
 
   if (!textContent.trim() && toolCalls.length === 0 && finishReason === "stop") {
     const fallback = await completeOneTurn(messages, resolvedModel, tools);
@@ -1132,26 +1143,17 @@ function buildSystemMessages(agentId, agent) {
   return [{ role: "system", content }];
 }
 
-async function runAgentTurn({ agentId, message, onDelta }) {
-  const agent = agentRegistry.get(agentId);
-  if (!agent) throw new Error(`Agent ${agentId} not found`);
-  const sessionKey = `agent:${agentId}:${MAIN_KEY}`;
-  const history = getHistory(sessionKey);
-  const model = (sessionSettings.get(sessionKey) || {}).model || agent.settings?.model || HERMES_MODEL;
-  const messages = [
-    ...buildSystemMessages(agentId, agent),
-    ...(agent.settings?.wipe ? [] : history),
-    { role: "user", content: message },
-  ];
-  // The Hermes API runs its own tool loop server-side and ignores client tools: one call is the whole run.
-  const { textContent } = await streamOneTurn(messages, model, [], onDelta, null);
-  if (agent.settings?.continuity !== false) {
-    history.push({ role: "user", content: message });
-    history.push({ role: "assistant", content: textContent });
-    saveHistoryToDisk();
-  }
-  return textContent;
-}
+// The Hermes API runs its own tool loop server-side and ignores client tools: one call is the whole run.
+const runAgentTurn = createRunAgentTurn({
+  getAgent: (id) => agentRegistry.get(id) || null,
+  getHistory,
+  saveHistory: saveHistoryToDisk,
+  resolveModel: (sessionKey, agent) =>
+    (sessionSettings.get(sessionKey) || {}).model || agent.settings?.model || HERMES_MODEL,
+  buildSystemMessages,
+  streamOneTurn,
+  mainKey: MAIN_KEY,
+});
 
 const teamManager = createTeamManager({
   getAgent: (id) => agentRegistry.get(id) || null,
@@ -1743,5 +1745,6 @@ function startAdapter() {
 }
 
 loadHistoryFromDisk();
+if (closeDanglingTurns(conversationHistory) > 0) saveHistoryToDisk();
 loadBrainSettingsFromDisk();
 startAdapter();
