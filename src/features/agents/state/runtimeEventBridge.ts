@@ -519,10 +519,8 @@ export const buildSummarySnapshotPatches = ({
       const latestItem = preview.items[preview.items.length - 1];
       if (latestItem?.role === "assistant" && agent.status !== "running") {
         const previewTs = toTimestampMs(latestItem.timestamp);
-        if (typeof previewTs === "number") {
+        if (typeof previewTs === "number" && previewTs > 0) {
           patch.lastAssistantMessageAt = previewTs;
-        } else if (typeof activity === "number") {
-          patch.lastAssistantMessageAt = activity;
         }
       }
       const lastAssistant = [...preview.items]

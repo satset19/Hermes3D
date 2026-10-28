@@ -13,7 +13,7 @@ import {
 import type { AgentState as AgentRecord } from "@/features/agents/state/store";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Check, ChevronRight, Clock, Mic, Paperclip, Pencil, Square, Trash2, X } from "lucide-react";
+import { Check, ChevronRight, Clock, Mic, Music, Paperclip, Pencil, Square, Trash2, X } from "lucide-react";
 import type { GatewayModelChoice } from "@/lib/gateway/models";
 import type { AgentAvatarProfile } from "@/lib/avatars/profile";
 import { rewriteMediaLinesToMarkdown } from "@/lib/text/media-markdown";
@@ -26,6 +26,7 @@ import type {
   PendingExecApproval,
 } from "@/features/agents/approvals/types";
 import type { RuntimeAttachment } from "@/lib/runtime/types";
+import type { AgentDanceStyle } from "@/features/retro-office/core/types";
 import {
   buildAgentChatRenderBlocks,
   buildFinalAgentChatItems,
@@ -138,6 +139,7 @@ type AgentChatPanelProps = {
   onOpenSettings?: () => void;
   onRename?: (name: string) => Promise<boolean>;
   onNewSession?: () => Promise<void> | void;
+  onClearChat?: () => Promise<void> | void;
   onModelChange: (value: string | null) => void;
   onThinkingChange: (value: string | null) => void;
   onToolCallingToggle?: (enabled: boolean) => void;
@@ -150,6 +152,7 @@ type AgentChatPanelProps = {
   pendingExecApprovals?: PendingExecApproval[];
   onResolveExecApproval?: (id: string, decision: ExecApprovalDecision) => void;
   onVoiceSend?: (payload: VoiceSendPayload) => Promise<void>;
+  onDance?: (style: AgentDanceStyle | "stop") => void;
 };
 
 const formatApprovalExpiry = (timestampMs: number): string => {
@@ -191,34 +194,35 @@ const ExecApprovalCard = memo(function ExecApprovalCard({
           {approval.error}
         </div>
       ) : null}
-      <div className="mt-1 flex flex-wrap gap-1">
-        <button
-          type="button"
-          className="rounded border border-border/70 bg-surface-3 px-1.5 py-0.5 font-mono text-[8px] font-medium tracking-[0.02em] text-foreground transition hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-60"
-          onClick={() => onResolve?.(approval.id, "allow-once")}
-          disabled={disabled}
-          aria-label={`Allow once for exec approval ${approval.id}`}
+      <div className="mt-1.5 flex items-center gap-1.5">
+        <label
+          htmlFor={`exec-approval-select-${approval.id}`}
+          className="font-mono text-[8px] text-muted-foreground whitespace-nowrap"
         >
-          Allow once
-        </button>
-        <button
-          type="button"
-          className="rounded border border-border/70 bg-surface-3 px-1.5 py-0.5 font-mono text-[8px] font-medium tracking-[0.02em] text-foreground transition hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-60"
-          onClick={() => onResolve?.(approval.id, "allow-always")}
+          Decision:
+        </label>
+        <select
+          id={`exec-approval-select-${approval.id}`}
+          data-testid={`exec-approval-select-${approval.id}`}
+          aria-label={`Select decision for exec approval ${approval.id}`}
+          className="ui-input ui-control-important h-5 rounded border border-border/70 bg-surface-3 px-1.5 font-mono text-[8px] font-medium text-foreground transition hover:bg-surface-2 focus:outline-none focus:ring-1 focus:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
+          style={CHAT_SELECT_STYLE}
           disabled={disabled}
-          aria-label={`Always allow for exec approval ${approval.id}`}
+          value=""
+          onChange={(event) => {
+            const decision = event.target.value as ExecApprovalDecision;
+            if (decision) {
+              onResolve?.(approval.id, decision);
+            }
+          }}
         >
-          Always allow
-        </button>
-        <button
-          type="button"
-          className="ui-btn-danger rounded px-1.5 py-0.5 font-mono text-[8px] font-medium tracking-[0.02em] transition disabled:cursor-not-allowed disabled:opacity-60"
-          onClick={() => onResolve?.(approval.id, "deny")}
-          disabled={disabled}
-          aria-label={`Deny exec approval ${approval.id}`}
-        >
-          Deny
-        </button>
+          <option value="" disabled>
+            {approval.resolving ? "Resolving..." : "Select decision..."}
+          </option>
+          <option value="allow-once">Allow once</option>
+          <option value="allow-always">Always allow</option>
+          <option value="deny">Deny</option>
+        </select>
       </div>
     </div>
   );
@@ -1282,6 +1286,7 @@ export const AgentChatPanel = ({
   onOpenSettings,
   onRename,
   onNewSession,
+  onClearChat,
   onModelChange,
   onThinkingChange,
   onToolCallingToggle = noopToggle,
@@ -1294,9 +1299,13 @@ export const AgentChatPanel = ({
   pendingExecApprovals = [],
   onResolveExecApproval,
   onVoiceSend,
+  onDance,
 }: AgentChatPanelProps) => {
+  const [danceMenuOpen, setDanceMenuOpen] = useState(false);
+  const danceMenuRef = useRef<HTMLDivElement>(null);
   const [draftValue, setDraftValue] = useState(agent.draft);
   const [newSessionBusy, setNewSessionBusy] = useState(false);
+  const [clearChatBusy, setClearChatBusy] = useState(false);
   const [renameEditing, setRenameEditing] = useState(false);
   const [renameSaving, setRenameSaving] = useState(false);
   const [renameDraft, setRenameDraft] = useState(agent.name);
@@ -1335,6 +1344,40 @@ export const AgentChatPanel = ({
   const handleDraftRef = useCallback((el: HTMLTextAreaElement | HTMLInputElement | null) => {
     draftRef.current = el instanceof HTMLTextAreaElement ? el : null;
   }, []);
+
+  useEffect(() => {
+    if (!danceMenuOpen) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      if (danceMenuRef.current && !danceMenuRef.current.contains(e.target as Node)) {
+        setDanceMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+    };
+  }, [danceMenuOpen]);
+
+  const handleTriggerDance = useCallback(
+    (style: AgentDanceStyle | "stop") => {
+      if (onDance) {
+        onDance(style);
+      }
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(
+          new CustomEvent("hermes3d:trigger-dance", {
+            detail: {
+              agentId: agent.agentId,
+              danceStyle: style === "stop" ? undefined : style,
+              durationMs: style === "stop" ? 0 : 15_000,
+            },
+          }),
+        );
+      }
+      setDanceMenuOpen(false);
+    },
+    [agent.agentId, onDance],
+  );
 
   useEffect(() => {
     const previousIdentity = draftIdentityRef.current;
@@ -1637,6 +1680,18 @@ export const AgentChatPanel = ({
 
   const newSessionDisabled = newSessionBusy || !canSend || !onNewSession;
 
+  const handleClearChat = useCallback(async () => {
+    if (!onClearChat || clearChatBusy || !canSend) return;
+    setClearChatBusy(true);
+    try {
+      await onClearChat();
+    } finally {
+      setClearChatBusy(false);
+    }
+  }, [canSend, clearChatBusy, onClearChat]);
+
+  const clearChatDisabled = clearChatBusy || !canSend || !onClearChat;
+
   return (
     <div data-agent-panel className="group fade-up relative flex h-full w-full flex-col">
       <div className="px-3 pt-2 sm:px-4 sm:pt-3">
@@ -1745,6 +1800,85 @@ export const AgentChatPanel = ({
                 onClick={onOpenSettings}
               >
                 <ChevronRight className="h-3.5 w-3.5" />
+              </button>
+            ) : null}
+            <div className="relative" ref={danceMenuRef}>
+              <button
+                className={`nodrag inline-flex items-center gap-1 whitespace-nowrap rounded border px-2 py-0.5 font-mono text-[9px] font-medium tracking-[0.02em] transition ${
+                  danceMenuOpen
+                    ? "border-primary/50 bg-primary/20 text-primary"
+                    : "border-white/15 bg-white/5 text-white/80 hover:bg-white/10 hover:text-white"
+                }`}
+                type="button"
+                data-testid="agent-dance-trigger"
+                aria-label="Trigger dance animation"
+                title="Dance emotes"
+                onClick={() => setDanceMenuOpen((v) => !v)}
+              >
+                <Music className="h-2.5 w-2.5" />
+                <span>Dance</span>
+              </button>
+              {danceMenuOpen ? (
+                <div className="absolute right-0 top-full z-50 mt-1 min-w-[120px] rounded-md border border-border/70 bg-popover/95 py-1 shadow-xl backdrop-blur-md">
+                  <button
+                    type="button"
+                    className="w-full px-2.5 py-1 text-left font-mono text-[9px] text-foreground hover:bg-accent/40"
+                    onClick={() => handleTriggerDance("cheer")}
+                  >
+                    Cheer
+                  </button>
+                  <button
+                    type="button"
+                    className="w-full px-2.5 py-1 text-left font-mono text-[9px] text-foreground hover:bg-accent/40"
+                    onClick={() => handleTriggerDance("disco")}
+                  >
+                    Disco
+                  </button>
+                  <button
+                    type="button"
+                    className="w-full px-2.5 py-1 text-left font-mono text-[9px] text-foreground hover:bg-accent/40"
+                    onClick={() => handleTriggerDance("wave")}
+                  >
+                    Robot Wave
+                  </button>
+                  <button
+                    type="button"
+                    className="w-full px-2.5 py-1 text-left font-mono text-[9px] text-foreground hover:bg-accent/40"
+                    onClick={() => handleTriggerDance("spin")}
+                  >
+                    360 Spin
+                  </button>
+                  <button
+                    type="button"
+                    className="w-full px-2.5 py-1 text-left font-mono text-[9px] text-foreground hover:bg-accent/40"
+                    onClick={() => handleTriggerDance("rock")}
+                  >
+                    Rock Headbang
+                  </button>
+                  <div className="my-0.5 border-t border-border/40" />
+                  <button
+                    type="button"
+                    className="w-full px-2.5 py-1 text-left font-mono text-[9px] text-destructive hover:bg-destructive/20"
+                    onClick={() => handleTriggerDance("stop")}
+                  >
+                    Stop Dance
+                  </button>
+                </div>
+              ) : null}
+            </div>
+            {onClearChat ? (
+              <button
+                className="nodrag inline-flex items-center whitespace-nowrap rounded border border-white/15 bg-white/5 px-2 py-0.5 font-mono text-[9px] font-medium tracking-[0.02em] text-white/80 transition hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+                type="button"
+                data-testid="agent-clear-chat-toggle"
+                aria-label="Clear chat"
+                title="Clear chat"
+                onClick={() => {
+                  void handleClearChat();
+                }}
+                disabled={clearChatDisabled}
+              >
+                {clearChatBusy ? "Clearing..." : "Clear chat"}
               </button>
             ) : null}
             <button

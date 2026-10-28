@@ -1,7 +1,7 @@
 "use client";
 
-import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useState } from "react";
-import { RefreshCcw, Shuffle } from "lucide-react";
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
+import { Palette, RefreshCcw, Shuffle, Upload } from "lucide-react";
 import {
   AGENT_AVATAR_BOTTOM_STYLE_OPTIONS,
   AGENT_AVATAR_CLOTHING_COLOR_OPTIONS,
@@ -65,6 +65,35 @@ export const AgentAvatarEditorPanel = forwardRef<
   const resolvedInitialProfile = initialProfile ?? fallbackProfile;
   const [draft, setDraft] = useState<AgentAvatarProfile>(resolvedInitialProfile);
   const [saving, setSaving] = useState(false);
+  const [isFileDragging, setIsFileDragging] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const handleFileDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    setIsFileDragging(false);
+    const files = e.dataTransfer.files;
+    if (!files || files.length === 0) return;
+    const file = files[0];
+    const name = file.name.toLowerCase();
+    if (name.endsWith(".glb") || name.endsWith(".gltf") || name.endsWith(".vrm")) {
+      const objectUrl = URL.createObjectURL(file);
+      setDraft((current) => ({
+        ...current,
+        imageUrl: objectUrl,
+      }));
+    }
+  }, []);
+
+  const handleFileInputChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+    const file = files[0];
+    const objectUrl = URL.createObjectURL(file);
+    setDraft((current) => ({
+      ...current,
+      imageUrl: objectUrl,
+    }));
+  }, []);
 
   useEffect(() => {
     setDraft(resolvedInitialProfile);
@@ -103,10 +132,46 @@ export const AgentAvatarEditorPanel = forwardRef<
         <div className="mt-1 text-xs text-muted-foreground">
           Personalize this office avatar locally on this machine.
         </div>
-        <div className="mt-4 overflow-hidden rounded-xl border border-border/45 bg-[#070b16]">
+        <div
+          className={`relative mt-4 overflow-hidden rounded-xl border transition-colors bg-[#070b16] ${
+            isFileDragging
+              ? "border-amber-500 ring-2 ring-amber-500/50"
+              : "border-border/45"
+          }`}
+          onDragOver={(e) => {
+            e.preventDefault();
+            setIsFileDragging(true);
+          }}
+          onDragLeave={() => setIsFileDragging(false)}
+          onDrop={handleFileDrop}
+        >
           <AgentAvatarPreview3D profile={draft} className="h-[360px] w-full" />
+          {isFileDragging ? (
+            <div className="pointer-events-none absolute inset-0 z-20 flex flex-col items-center justify-center bg-black/80 p-4 text-center backdrop-blur-xs">
+              <Upload className="h-8 w-8 animate-bounce text-amber-400" />
+              <p className="mt-2 text-xs font-semibold text-amber-200">
+                Drop 3D Model (.glb, .gltf, .vrm)
+              </p>
+            </div>
+          ) : null}
         </div>
         <div className="mt-4 flex flex-wrap gap-2">
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".glb,.gltf,.vrm"
+            className="hidden"
+            onChange={handleFileInputChange}
+          />
+          <button
+            type="button"
+            className="ui-btn-secondary inline-flex items-center gap-2 px-3 py-2 text-xs"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={saving}
+          >
+            <Upload className="h-3.5 w-3.5 text-amber-400" />
+            Upload 3D Model
+          </button>
           <button
             type="button"
             className="ui-btn-secondary inline-flex items-center gap-2 px-3 py-2 text-xs"
@@ -152,6 +217,64 @@ export const AgentAvatarEditorPanel = forwardRef<
           </div>
         ) : null}
         <div className="grid gap-6 xl:grid-cols-2">
+          {/* Avatar Resize / Scale Tool */}
+          <section className="space-y-3 rounded-xl border border-border/40 bg-muted/20 p-4 xl:col-span-2">
+            <div className="flex items-center justify-between gap-2">
+              <h3 className="font-mono text-[11px] font-semibold uppercase tracking-[0.06em] text-muted-foreground">
+                Avatar Size & Scale
+              </h3>
+              <span className="font-mono text-xs font-bold text-amber-300">
+                {(draft.scale ?? 1.0).toFixed(2)}x
+              </span>
+            </div>
+            <div className="flex items-center gap-3">
+              <input
+                type="range"
+                min="0.7"
+                max="1.5"
+                step="0.05"
+                value={draft.scale ?? 1.0}
+                onChange={(e) => {
+                  const val = parseFloat(e.target.value);
+                  setDraft((current) => ({
+                    ...current,
+                    scale: val,
+                  }));
+                }}
+                className="h-2 w-full cursor-pointer appearance-none rounded-lg bg-border/60 accent-amber-500"
+              />
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {[
+                { label: "Compact", scale: 0.85 },
+                { label: "Normal", scale: 1.0 },
+                { label: "Tall", scale: 1.2 },
+                { label: "Giant", scale: 1.4 },
+              ].map((preset) => {
+                const active = Math.abs((draft.scale ?? 1.0) - preset.scale) < 0.04;
+                return (
+                  <button
+                    key={preset.label}
+                    type="button"
+                    className={`${pillClassName} ${
+                      active
+                        ? "border-amber-500 bg-amber-500/15 text-amber-200"
+                        : "border-border/50 bg-muted/30 text-muted-foreground hover:text-foreground"
+                    }`}
+                    onClick={() =>
+                      setDraft((current) => ({
+                        ...current,
+                        scale: preset.scale,
+                      }))
+                    }
+                  >
+                    {preset.label} ({preset.scale}x)
+                  </button>
+                );
+              })}
+            </div>
+          </section>
+
           <section className="space-y-3">
             <h3 className="font-mono text-[11px] font-semibold tracking-[0.06em] text-muted-foreground">
               Skin tone
@@ -175,6 +298,23 @@ export const AgentAvatarEditorPanel = forwardRef<
                   />
                 );
               })}
+              <label
+                title="Custom Skin Tone"
+                className="relative flex h-7 w-7 cursor-pointer items-center justify-center rounded-full border-2 border-dashed border-white/40 bg-muted/40 transition-transform hover:scale-105"
+              >
+                <input
+                  type="color"
+                  value={draft.body.skinTone}
+                  onChange={(e) =>
+                    setDraft((current) => ({
+                      ...current,
+                      body: { ...current.body, skinTone: e.target.value },
+                    }))
+                  }
+                  className="absolute inset-0 cursor-pointer opacity-0"
+                />
+                <Palette className="h-3 w-3 text-muted-foreground" />
+              </label>
             </div>
           </section>
 
@@ -231,6 +371,23 @@ export const AgentAvatarEditorPanel = forwardRef<
                   />
                 );
               })}
+              <label
+                title="Custom Hair Color"
+                className="relative flex h-7 w-7 cursor-pointer items-center justify-center rounded-full border-2 border-dashed border-white/40 bg-muted/40 transition-transform hover:scale-105"
+              >
+                <input
+                  type="color"
+                  value={draft.hair.color}
+                  onChange={(e) =>
+                    setDraft((current) => ({
+                      ...current,
+                      hair: { ...current.hair, color: e.target.value },
+                    }))
+                  }
+                  className="absolute inset-0 cursor-pointer opacity-0"
+                />
+                <Palette className="h-3 w-3 text-muted-foreground" />
+              </label>
             </div>
           </section>
 
@@ -287,6 +444,23 @@ export const AgentAvatarEditorPanel = forwardRef<
                   />
                 );
               })}
+              <label
+                title="Custom Top Color"
+                className="relative flex h-7 w-7 cursor-pointer items-center justify-center rounded-full border-2 border-dashed border-white/40 bg-muted/40 transition-transform hover:scale-105"
+              >
+                <input
+                  type="color"
+                  value={draft.clothing.topColor}
+                  onChange={(e) =>
+                    setDraft((current) => ({
+                      ...current,
+                      clothing: { ...current.clothing, topColor: e.target.value },
+                    }))
+                  }
+                  className="absolute inset-0 cursor-pointer opacity-0"
+                />
+                <Palette className="h-3 w-3 text-muted-foreground" />
+              </label>
             </div>
           </section>
 
@@ -343,6 +517,23 @@ export const AgentAvatarEditorPanel = forwardRef<
                   />
                 );
               })}
+              <label
+                title="Custom Bottom Color"
+                className="relative flex h-7 w-7 cursor-pointer items-center justify-center rounded-full border-2 border-dashed border-white/40 bg-muted/40 transition-transform hover:scale-105"
+              >
+                <input
+                  type="color"
+                  value={draft.clothing.bottomColor}
+                  onChange={(e) =>
+                    setDraft((current) => ({
+                      ...current,
+                      clothing: { ...current.clothing, bottomColor: e.target.value },
+                    }))
+                  }
+                  className="absolute inset-0 cursor-pointer opacity-0"
+                />
+                <Palette className="h-3 w-3 text-muted-foreground" />
+              </label>
             </div>
           </section>
 
@@ -369,6 +560,23 @@ export const AgentAvatarEditorPanel = forwardRef<
                   />
                 );
               })}
+              <label
+                title="Custom Shoe Color"
+                className="relative flex h-7 w-7 cursor-pointer items-center justify-center rounded-full border-2 border-dashed border-white/40 bg-muted/40 transition-transform hover:scale-105"
+              >
+                <input
+                  type="color"
+                  value={draft.clothing.shoesColor}
+                  onChange={(e) =>
+                    setDraft((current) => ({
+                      ...current,
+                      clothing: { ...current.clothing, shoesColor: e.target.value },
+                    }))
+                  }
+                  className="absolute inset-0 cursor-pointer opacity-0"
+                />
+                <Palette className="h-3 w-3 text-muted-foreground" />
+              </label>
             </div>
           </section>
 

@@ -19,7 +19,8 @@ function createRunAgentTurn({ getAgent, getHistory, saveHistory, resolveModel, b
       { role: "user", content: message },
     ];
     if (keep) {
-      history.push({ role: "user", content: message });
+      const nowMs = Date.now();
+      history.push({ role: "user", content: message, createdAt: nowMs, timestamp: nowMs });
       saveHistory();
     }
     let partial = "";
@@ -33,15 +34,17 @@ function createRunAgentTurn({ getAgent, getHistory, saveHistory, resolveModel, b
         throw signal.reason instanceof Error ? signal.reason : new Error("Run aborted");
       }
       if (keep) {
-        history.push({ role: "assistant", content: textContent });
+        const nowMs = Date.now();
+        history.push({ role: "assistant", content: textContent, createdAt: nowMs, timestamp: nowMs });
         saveHistory();
       }
       return textContent;
     } catch (err) {
       if (keep) {
+        const nowMs = Date.now();
         const reason = err && err.message ? err.message : String(err);
         const content = partial ? `${partial}\n\n[Run stopped: ${reason}]` : `[Run stopped: ${reason}]`;
-        history.push({ role: "assistant", content });
+        history.push({ role: "assistant", content, createdAt: nowMs, timestamp: nowMs });
         saveHistory();
       }
       throw err;
@@ -54,7 +57,8 @@ function closeDanglingTurns(conversationHistory) {
   for (const [key, messages] of conversationHistory.entries()) {
     if (!key.startsWith("agent:") || !Array.isArray(messages) || messages.length === 0) continue;
     if (messages[messages.length - 1].role !== "user") continue;
-    messages.push({ role: "assistant", content: DANGLING_NOTE });
+    const nowMs = Date.now();
+    messages.push({ role: "assistant", content: DANGLING_NOTE, createdAt: nowMs, timestamp: nowMs });
     closed += 1;
   }
   return closed;

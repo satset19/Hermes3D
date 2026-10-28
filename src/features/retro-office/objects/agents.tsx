@@ -1,6 +1,6 @@
 import { Billboard, Text } from "@react-three/drei";
 import { useFrame } from "@react-three/fiber";
-import { Suspense, memo, useMemo, useRef, useState } from "react";
+import { Suspense, memo, useMemo, useRef } from "react";
 import * as THREE from "three";
 import { createDefaultAgentAvatarProfile } from "@/lib/avatars/profile";
 import { getAvatarBodyShape } from "@/lib/avatars/bodyShape";
@@ -17,6 +17,7 @@ import {
   WALK_ANIM_SPEED,
 } from "@/features/retro-office/core/constants";
 import { toWorld } from "@/features/retro-office/core/geometry";
+import { isSpeechBubbleVisible } from "@/features/retro-office/core/speechTurns";
 import type {
   JanitorActor,
   RenderAgent,
@@ -97,6 +98,12 @@ export const AgentModel = memo(function AgentModel({
   showSpeech = false,
   speechText = null,
   suppressSpeechBubble = false,
+  standupMeeting = null,
+  onDismissSpeech,
+  onSpeechBubbleClick,
+  onPointerDown,
+  isBeingDragged = false,
+  scaleMultiplier,
 }: AgentModelProps) {
   const groupRef = useRef<THREE.Group>(null);
   const headRef = useRef<THREE.Group>(null);
@@ -132,35 +139,88 @@ export const AgentModel = memo(function AgentModel({
     () => appearance ?? createDefaultAgentAvatarProfile(agentId),
     [agentId, appearance],
   );
+  const rawModelUrl = resolvedAppearance.imageUrl?.trim() ?? "";
+  const isDirect3DModel =
+    rawModelUrl.startsWith("blob:") ||
+    rawModelUrl.endsWith(".glb") ||
+    rawModelUrl.endsWith(".gltf") ||
+    rawModelUrl.endsWith(".vrm");
+  const presetModelUrl = isDirect3DModel
+    ? rawModelUrl
+    : findAnimePresetModelUrl(resolvedAppearance.imageUrl);
 
-  const [agentStateLabel, setAgentStateLabel] = useState<string>("standing");
+  const avatarColors = useMemo(
+    () => ({
+      skin: resolvedAppearance.body.skinTone,
+      hair: resolvedAppearance.hair.color,
+      top: resolvedAppearance.clothing.topColor,
+      bottom: resolvedAppearance.clothing.bottomColor,
+      shoes: resolvedAppearance.clothing.shoesColor,
+    }),
+    [
+      resolvedAppearance.body.skinTone,
+      resolvedAppearance.hair.color,
+      resolvedAppearance.clothing.topColor,
+      resolvedAppearance.clothing.bottomColor,
+      resolvedAppearance.clothing.shoesColor,
+    ],
+  );
 
-  useFrame(() => {
+  const agentStateRef = useRef<string>("standing");
+  const presetModelGroupRef = useRef<THREE.Group>(null);
+
+  useFrame((_, delta) => {
     const agent =
       agentLookupRef?.current?.get(agentId) ??
       agentsRef.current?.find((candidate) => candidate.id === agentId);
     if (!agent || !groupRef.current) return;
-    if (agent.state !== agentStateLabel) {
-      setAgentStateLabel(agent.state);
+    const effectiveState =
+      agent.state === "walking" && (agent.path?.length ?? 0) === 0
+        ? "standing"
+        : agent.state;
+    const nextAnimState =
+      effectiveState === "dancing" && agent.danceStyle
+        ? `dancing:${agent.danceStyle}`
+        : effectiveState;
+    if (nextAnimState !== agentStateRef.current) {
+      agentStateRef.current = nextAnimState;
+    }
+    if (presetModelGroupRef.current) {
+      presetModelGroupRef.current.position.y = agent.state === "sitting" ? 0.0 : 0;
     }
 
     const [wx, , wz] = toWorld(agent.x, agent.y);
     pos.current.set(wx, 0, wz);
+
+    const safeDelta = Math.min(delta, 0.1);
 
     if (!isPositionInitialized.current) {
       groupRef.current.position.set(wx, 0, wz);
       groupRef.current.rotation.y = agent.facing;
       isPositionInitialized.current = true;
     } else {
-      groupRef.current.position.lerp(pos.current, 0.15);
+      groupRef.current.position.x = THREE.MathUtils.damp(
+        groupRef.current.position.x,
+        wx,
+        14,
+        safeDelta,
+      );
+      groupRef.current.position.z = THREE.MathUtils.damp(
+        groupRef.current.position.z,
+        wz,
+        14,
+        safeDelta,
+      );
       const targetY = agent.facing;
       let rotDelta = targetY - groupRef.current.rotation.y;
       while (rotDelta > Math.PI) rotDelta -= Math.PI * 2;
       while (rotDelta < -Math.PI) rotDelta += Math.PI * 2;
-      groupRef.current.rotation.y += rotDelta * 0.12;
+      const rotAlpha = 1 - Math.exp(-12 * safeDelta);
+      groupRef.current.rotation.y += rotDelta * rotAlpha;
     }
     const isWorkout = agent.state === "working_out";
     const isDancing = agent.state === "dancing";
+    const danceStyle = agent.danceStyle ?? "cheer";
     const isJanitor = "role" in agent && agent.role === "janitor";
     const janitorTool = isJanitor
       ? (agent as RenderAgent & JanitorActor).janitorTool
@@ -174,46 +234,70 @@ export const AgentModel = memo(function AgentModel({
     const workoutPushPhase = Math.sin(
       agent.frame * 0.18 + (agent.phaseOffset ?? 0) + Math.PI / 2,
     );
-    groupRef.current.rotation.z = 0;
-    groupRef.current.rotation.x =
-      agent.state === "sitting"
-        ? -0.15
-        : isDancing
-          ? Math.sin(agent.frame * 0.18 + (agent.phaseOffset ?? 0)) * 0.06
-          : isWorkout
-            ? workoutStyle === "bike"
-              ? 0.18
-              : workoutStyle === "row"
-                ? -0.12 + Math.max(0, workoutPhase) * 0.08
-                : workoutStyle === "stretch"
-                  ? -0.08
-                  : workoutStyle === "run"
-                    ? 0.08
-                    : workoutStyle === "box"
-                      ? 0.04
-                      : 0.02
-            : agent.pingPongUntil
-              ? 0.08
+
+    if (presetModelUrl) {
+      groupRef.current.rotation.z = 0;
+      groupRef.current.rotation.x = 0;
+      groupRef.current.position.y = isBeingDragged ? 0.25 : 0;
+    } else {
+      groupRef.current.rotation.z = 0;
+      groupRef.current.rotation.x =
+        agent.state === "sitting"
+          ? 0
+          : isDancing
+            ? Math.sin(agent.frame * 0.18 + (agent.phaseOffset ?? 0)) * 0.06
+            : isWorkout
+              ? workoutStyle === "bike"
+                ? 0.18
+                : workoutStyle === "row"
+                  ? -0.12 + Math.max(0, workoutPhase) * 0.08
+                  : workoutStyle === "stretch"
+                    ? -0.08
+                    : workoutStyle === "run"
+                      ? 0.08
+                      : workoutStyle === "box"
+                        ? 0.04
+                        : 0.02
+              : agent.pingPongUntil
+                ? 0.08
+                : 0;
+      if (isDancing && danceStyle === "spin") {
+        groupRef.current.rotation.y += safeDelta * 4.5;
+      }
+      const bounce =
+        agent.state === "walking"
+          ? Math.sin(frameValue * WALK_ANIM_SPEED) * 0.04
+          : isDancing
+            ? danceStyle === "rock"
+              ? 0.02 + Math.abs(Math.sin(agent.frame * 0.45)) * 0.04
+              : danceStyle === "disco"
+                ? 0.02 + Math.abs(Math.sin(agent.frame * 0.2)) * 0.05
+                : danceStyle === "spin"
+                  ? 0.02
+                  : 0.03 +
+                    Math.abs(Math.sin(agent.frame * 0.22 + (agent.phaseOffset ?? 0))) *
+                      0.05
+            : isWorkout
+              ? workoutStyle === "bike"
+                ? Math.sin(workoutPhase * 2) * 0.015
+                : workoutStyle === "run"
+                  ? Math.abs(Math.sin(workoutPhase * 2)) * 0.045
+                  : workoutStyle === "box"
+                    ? Math.abs(Math.sin(workoutPushPhase * 2)) * 0.025
+                    : workoutStyle === "row"
+                      ? 0.015 + Math.abs(workoutPhase) * 0.028
+                      : 0.02 + Math.abs(workoutPhase) * 0.04
               : 0;
-    const bounce =
-      agent.state === "walking"
-        ? Math.sin(frameValue * WALK_ANIM_SPEED) * 0.04
-        : isDancing
-          ? 0.03 +
-            Math.abs(Math.sin(agent.frame * 0.22 + (agent.phaseOffset ?? 0))) *
-              0.05
-          : isWorkout
-            ? workoutStyle === "stretch"
-              ? 0.012 + Math.abs(workoutPhase) * 0.018
-              : workoutStyle === "row"
-                ? 0.015 + Math.abs(workoutPhase) * 0.028
-                : 0.02 + Math.abs(workoutPhase) * 0.04
-            : 0;
-    const breathe =
-      agent.state === "standing" || isWorkout || agent.pingPongUntil
-        ? Math.sin(frameValue * 0.03) * 0.01
-        : 0;
-    groupRef.current.position.y = bounce + breathe;
+      const breathe =
+        agent.state === "standing" || isWorkout || agent.pingPongUntil
+          ? Math.sin(frameValue * 0.03) * 0.01
+          : 0;
+      groupRef.current.position.y =
+        (agent.state === "sitting" ? 0.04 : 0) +
+        bounce +
+        breathe +
+        (isBeingDragged ? 0.25 : 0);
+    }
 
     const isSitting = agent.state === "sitting";
     const isTyping =
@@ -227,6 +311,20 @@ export const AgentModel = memo(function AgentModel({
       if (isTyping) {
         headRef.current.rotation.x =
           0.12 + Math.sin(agent.frame * 0.18) * 0.04;
+      } else if (isDancing) {
+        if (danceStyle === "rock") {
+          headRef.current.rotation.x = Math.sin(agent.frame * 0.45) * 0.4;
+        } else if (danceStyle === "wave") {
+          headRef.current.rotation.y =
+            Math.sin(Math.floor(agent.frame * 0.08) * (Math.PI / 2)) * 0.35;
+        } else if (danceStyle === "disco") {
+          headRef.current.rotation.x = -0.15 + Math.sin(agent.frame * 0.18) * 0.15;
+          headRef.current.rotation.z = Math.sin(agent.frame * 0.18) * 0.12;
+        } else if (danceStyle === "spin") {
+          headRef.current.rotation.y = Math.sin(agent.frame * 0.25) * 0.2;
+        } else {
+          headRef.current.rotation.x = Math.sin(agent.frame * 0.22) * 0.1;
+        }
       }
     }
 
@@ -240,12 +338,32 @@ export const AgentModel = memo(function AgentModel({
       } else if (agent.state === "walking") {
         leftArmRef.current.rotation.x = walkPhase * 0.4;
       } else if (isDancing) {
-        leftArmRef.current.rotation.x =
-          -0.8 + Math.sin(agent.frame * 0.22) * 0.9;
-        leftArmRef.current.rotation.z =
-          -0.45 + Math.cos(agent.frame * 0.16) * 0.18;
-        leftArmRef.current.rotation.y = -0.08;
-        groupRef.current.rotation.z = Math.sin(agent.frame * 0.12) * 0.08;
+        if (danceStyle === "disco") {
+          leftArmRef.current.rotation.x = -0.2;
+          leftArmRef.current.rotation.z = -0.65;
+          leftArmRef.current.rotation.y = -0.1;
+          groupRef.current.rotation.z = Math.sin(agent.frame * 0.2) * 0.12;
+        } else if (danceStyle === "wave") {
+          leftArmRef.current.rotation.x = -0.4 + Math.sin(agent.frame * 0.18) * 0.7;
+          leftArmRef.current.rotation.z =
+            -0.3 + Math.sin(agent.frame * 0.18 + Math.PI / 4) * 0.4;
+          groupRef.current.rotation.z = Math.sin(agent.frame * 0.18) * 0.06;
+        } else if (danceStyle === "spin") {
+          leftArmRef.current.rotation.x = -0.15;
+          leftArmRef.current.rotation.z = -1.25;
+        } else if (danceStyle === "rock") {
+          leftArmRef.current.rotation.x = -0.85;
+          leftArmRef.current.rotation.z = -0.45;
+          leftArmRef.current.rotation.y = 0.2;
+          groupRef.current.rotation.x = Math.sin(agent.frame * 0.45) * 0.12;
+        } else {
+          leftArmRef.current.rotation.x =
+            -0.8 + Math.sin(agent.frame * 0.22) * 0.9;
+          leftArmRef.current.rotation.z =
+            -0.45 + Math.cos(agent.frame * 0.16) * 0.18;
+          leftArmRef.current.rotation.y = -0.08;
+          groupRef.current.rotation.z = Math.sin(agent.frame * 0.12) * 0.08;
+        }
       } else if (isWorkout) {
         if (workoutStyle === "run") {
           leftArmRef.current.rotation.x = -(0.28 + workoutPhase * 1.05);
@@ -304,12 +422,29 @@ export const AgentModel = memo(function AgentModel({
       } else if (agent.state === "walking") {
         rightArmRef.current.rotation.x = -walkPhase * 0.4;
       } else if (isDancing) {
-        rightArmRef.current.rotation.x =
-          -0.8 - Math.sin(agent.frame * 0.22) * 0.9;
-        rightArmRef.current.rotation.z =
-          0.45 - Math.cos(agent.frame * 0.16) * 0.18;
-        rightArmRef.current.rotation.y = 0.08;
-        groupRef.current.rotation.z = Math.sin(agent.frame * 0.12) * 0.08;
+        if (danceStyle === "disco") {
+          rightArmRef.current.rotation.x = -0.4 - Math.sin(agent.frame * 0.2) * 1.2;
+          rightArmRef.current.rotation.z = 0.5 + Math.sin(agent.frame * 0.2) * 0.6;
+          rightArmRef.current.rotation.y = 0.15;
+        } else if (danceStyle === "wave") {
+          rightArmRef.current.rotation.x =
+            -0.4 + Math.sin(agent.frame * 0.18 + Math.PI) * 0.7;
+          rightArmRef.current.rotation.z =
+            0.3 + Math.sin(agent.frame * 0.18 + (5 * Math.PI) / 4) * 0.4;
+        } else if (danceStyle === "spin") {
+          rightArmRef.current.rotation.x = -0.15;
+          rightArmRef.current.rotation.z = 1.25;
+        } else if (danceStyle === "rock") {
+          rightArmRef.current.rotation.x = -0.3 + Math.sin(agent.frame * 0.45) * 0.5;
+          rightArmRef.current.rotation.z = 0.45;
+          rightArmRef.current.rotation.y = -0.15;
+        } else {
+          rightArmRef.current.rotation.x =
+            -0.8 - Math.sin(agent.frame * 0.22) * 0.9;
+          rightArmRef.current.rotation.z =
+            0.45 - Math.cos(agent.frame * 0.16) * 0.18;
+          rightArmRef.current.rotation.y = 0.08;
+        }
       } else if (isWorkout) {
         if (workoutStyle === "run") {
           rightArmRef.current.rotation.x = -(0.28 - workoutPhase * 1.05);
@@ -361,45 +496,60 @@ export const AgentModel = memo(function AgentModel({
       leftLegRef.current.rotation.x =
         agent.state === "walking"
           ? walkPhase * 0.35
-          : isDancing
-            ? Math.sin(agent.frame * 0.22 + (agent.phaseOffset ?? 0)) * 0.35
-            : isWorkout
-              ? workoutStyle === "run"
-                ? workoutPhase * 0.7
-                : workoutStyle === "bike"
-                  ? workoutPhase * 0.82
-                  : workoutStyle === "row"
-                    ? 0.14 + Math.max(0, workoutPhase) * 0.42
-                    : workoutStyle === "stretch"
-                      ? -0.2 + Math.abs(workoutPhase) * 0.08
-                      : workoutStyle === "box"
-                        ? 0.06 + workoutPhase * 0.14
-                        : workoutPhase * 0.18
-              : 0;
+          : agent.state === "sitting"
+            ? -1.45
+            : isDancing
+              ? danceStyle === "disco"
+                ? Math.max(0, Math.sin(agent.frame * 0.2)) * -0.3
+                : danceStyle === "rock"
+                  ? -0.2 + Math.sin(agent.frame * 0.45) * 0.15
+                  : danceStyle === "spin"
+                    ? -0.2
+                    : Math.sin(agent.frame * 0.22 + (agent.phaseOffset ?? 0)) * 0.35
+              : isWorkout
+                ? workoutStyle === "run"
+                  ? workoutPhase * 0.7
+                  : workoutStyle === "bike"
+                    ? workoutPhase * 0.82
+                    : workoutStyle === "row"
+                      ? 0.14 + Math.max(0, workoutPhase) * 0.42
+                      : workoutStyle === "stretch"
+                        ? -0.2 + Math.abs(workoutPhase) * 0.08
+                        : workoutStyle === "box"
+                          ? 0.06 + workoutPhase * 0.14
+                          : workoutPhase * 0.18
+                : 0;
     }
     if (rightLegRef.current) {
       rightLegRef.current.rotation.x =
         agent.state === "walking"
           ? -walkPhase * 0.35
-          : isDancing
-            ? -Math.sin(agent.frame * 0.22 + (agent.phaseOffset ?? 0)) * 0.35
-            : isWorkout
-              ? workoutStyle === "run"
-                ? -workoutPhase * 0.7
-                : workoutStyle === "bike"
-                  ? -workoutPhase * 0.82
-                  : workoutStyle === "row"
-                    ? 0.14 + Math.max(0, -workoutPhase) * 0.42
-                    : workoutStyle === "stretch"
-                      ? -0.12 + Math.abs(workoutPhase) * 0.08
-                      : workoutStyle === "box"
-                        ? 0.06 - workoutPhase * 0.14
-                        : -workoutPhase * 0.18
-              : 0;
+          : agent.state === "sitting"
+            ? -1.45
+            : isDancing
+              ? danceStyle === "disco"
+                ? Math.max(0, -Math.sin(agent.frame * 0.2)) * -0.3
+                : danceStyle === "rock"
+                  ? -0.2 - Math.sin(agent.frame * 0.45) * 0.15
+                  : danceStyle === "spin"
+                    ? 0
+                    : -Math.sin(agent.frame * 0.22 + (agent.phaseOffset ?? 0)) * 0.35
+              : isWorkout
+                ? workoutStyle === "run"
+                  ? -workoutPhase * 0.7
+                  : workoutStyle === "bike"
+                    ? -workoutPhase * 0.82
+                    : workoutStyle === "row"
+                      ? 0.14 + Math.max(0, -workoutPhase) * 0.42
+                      : workoutStyle === "stretch"
+                        ? -0.12 + Math.abs(workoutPhase) * 0.08
+                        : workoutStyle === "box"
+                          ? 0.06 - workoutPhase * 0.14
+                          : -workoutPhase * 0.18
+                : 0;
     }
 
     const working =
-      agent.state === "sitting" ||
       isWorkout ||
       isDancing ||
       agent.status === "working";
@@ -545,30 +695,26 @@ export const AgentModel = memo(function AgentModel({
       }
     }
 
-    const ambientBubbleVisible =
-      (!suppressSpeechBubble && isError) ||
-      (!isAway &&
-        !suppressSpeechBubble &&
-        !working &&
-        !isError &&
-        agent.state === "standing" &&
-        (agent.frame + blinkSeed * 11) % 320 < 42);
     const bumpTalking = (agent.bumpTalkUntil ?? 0) > Date.now();
+    const isStandupActiveSpeaker = Boolean(
+      standupMeeting?.phase === "in_progress" &&
+        standupMeeting.currentSpeakerAgentId === agentId,
+    );
 
     if (speechBubbleRef.current) {
-      const bubbleVisible =
-        !suppressSpeechBubble &&
-        (showSpeech || bumpTalking || ambientBubbleVisible || status === "working" || working);
+      const bubbleVisible = isSpeechBubbleVisible({
+        showSpeech,
+        speechText,
+        suppressSpeechBubble,
+        bumpTalking,
+        isStandupActiveSpeaker,
+      });
       speechBubbleRef.current.visible = bubbleVisible;
       if (bubbleVisible) {
         if (showSpeech && speechText?.trim()) {
           speechBubbleRef.current.scale.setScalar(1);
         } else {
-          const pulseBase = isError
-            ? 1.06
-            : showSpeech || bumpTalking || status === "working" || working
-              ? 1.03
-              : 0.98;
+          const pulseBase = isError ? 1.06 : 1.03;
           const pulse =
             pulseBase + Math.sin(agent.frame * (isError ? 0.18 : 0.12)) * 0.06;
           speechBubbleRef.current.scale.setScalar(pulse);
@@ -654,7 +800,6 @@ export const AgentModel = memo(function AgentModel({
   const cuffColor = topStyle === "hoodie" ? "#d1d5db" : sleeveColor;
   const topAccentColor = topStyle === "jacket" ? "#1f2937" : cuffColor;
   const shape = getAvatarBodyShape(resolvedAppearance.body.gender);
-  const presetModelUrl = findAnimePresetModelUrl(resolvedAppearance.imageUrl);
 
   const faceTexture = useMemo(() => {
     const canvas = document.createElement("canvas");
@@ -729,35 +874,49 @@ export const AgentModel = memo(function AgentModel({
         ? 0.071
         : 0.078
     : 0.06;
-  const speechBubbleTextColor = activeSpeechBubble
-    ? "#f8fafc"
-    : status === "error"
-      ? "#ff9aa5"
-      : status === "working"
-        ? "#b9f99d"
-        : "#a0c8ff";
-  const speechBubbleBorderColor = activeSpeechBubble
-    ? status === "error"
-      ? "#ff7f93"
-      : status === "working"
-        ? "#93f57d"
-        : "#8dc4ff"
-    : "transparent";
+  const isApprovalRequired = speechText?.trim() === "Approval required";
+  const speechBubbleTextColor = isApprovalRequired
+    ? "#fef3c7"
+    : activeSpeechBubble
+      ? "#f8fafc"
+      : status === "error"
+        ? "#ff9aa5"
+        : status === "working"
+          ? "#b9f99d"
+          : "#a0c8ff";
+  const speechBubbleBorderColor = isApprovalRequired
+    ? "#f59e0b"
+    : activeSpeechBubble
+      ? status === "error"
+        ? "#ff7f93"
+        : status === "working"
+          ? "#93f57d"
+          : "#8dc4ff"
+      : "transparent";
   const speechBubbleBorderInset = activeSpeechBubble ? 0.02 : 0;
   const nameplateText = name ? formatAgentNameplateText(name) : "";
   const subtitleText = typeof subtitle === "string" ? subtitle.trim() : "";
   const nameplateFontSize =
     nameplateText.length > 9 ? 0.118 : nameplateText.length > 7 ? 0.13 : 0.144;
 
+  const effectiveScale =
+    AGENT_SCALE * (scaleMultiplier ?? resolvedAppearance.scale ?? 1.0);
+
   return (
     <group
       ref={groupRef}
-      scale={[AGENT_SCALE, AGENT_SCALE, AGENT_SCALE]}
+      scale={[effectiveScale, effectiveScale, effectiveScale]}
       onPointerOver={(event) => {
         event.stopPropagation();
         onHover?.(agentId);
       }}
       onPointerOut={() => onUnhover?.()}
+      onPointerDown={(event) => {
+        if (event.button === 0) {
+          event.stopPropagation();
+          onPointerDown?.(agentId, event);
+        }
+      }}
       onClick={(event) => {
         event.stopPropagation();
         onClick?.(agentId);
@@ -768,8 +927,14 @@ export const AgentModel = memo(function AgentModel({
         onContextMenu?.(agentId, nativeEvent.clientX, nativeEvent.clientY);
       }}
     >
+      {isBeingDragged ? (
+        <mesh position={[0, 0.002, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+          <ringGeometry args={[0.16, 0.24, 24]} />
+          <meshBasicMaterial color="#f59e0b" transparent opacity={0.75} />
+        </mesh>
+      ) : null}
       {presetModelUrl ? (
-        <group position={[0, agentStateLabel === "sitting" ? -0.08 : 0, 0]}>
+        <group ref={presetModelGroupRef} position={[0, agentStateRef.current === "sitting" ? 0.0 : 0, 0]}>
           <mesh position={[0, 0.001, 0]} rotation={[-Math.PI / 2, 0, 0]}>
             <circleGeometry args={[0.12, 12]} />
             <meshBasicMaterial color="#000" transparent opacity={0.2} />
@@ -778,22 +943,8 @@ export const AgentModel = memo(function AgentModel({
             <AgentAvatarGlbModel
               modelUrl={presetModelUrl}
               targetHeight={0.5}
-              colors={{
-                skin: resolvedAppearance.body.skinTone,
-                hair: resolvedAppearance.hair.color,
-                top: resolvedAppearance.clothing.topColor,
-                bottom: resolvedAppearance.clothing.bottomColor,
-                shoes: resolvedAppearance.clothing.shoesColor,
-              }}
-              animationName={
-                agentStateLabel === "walking"
-                  ? "walk"
-                  : agentStateLabel === "dancing"
-                    ? "special"
-                    : agentStateLabel === "working_out"
-                      ? "attack"
-                      : "idle"
-              }
+              colors={avatarColors}
+              animationRef={agentStateRef}
             />
           </Suspense>
         </group>
@@ -1220,7 +1371,22 @@ export const AgentModel = memo(function AgentModel({
           </Text>
         </Billboard>
       </group>
-      <group ref={speechBubbleRef} visible={false}>
+      <group
+        ref={speechBubbleRef}
+        visible={false}
+        onClick={(event) => {
+          event.stopPropagation();
+          onSpeechBubbleClick?.(agentId);
+          onDismissSpeech?.(agentId);
+        }}
+        onPointerOver={(event) => {
+          event.stopPropagation();
+          document.body.style.cursor = "pointer";
+        }}
+        onPointerOut={() => {
+          document.body.style.cursor = "";
+        }}
+      >
         <Billboard position={[0, 1.18, 0]}>
           {activeSpeechBubble ? (
             <mesh

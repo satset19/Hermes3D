@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 const turn: any = await import("../../server/hermes3d-team-turn.js");
 const { createRunAgentTurn, closeDanglingTurns, DANGLING_NOTE } = turn;
 
-type Msg = { role: string; content: string };
+type Msg = { role: string; content: string; createdAt?: number; timestamp?: number };
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const setup = (streamOneTurn: any, settings: Record<string, unknown> = {}) => {
@@ -41,9 +41,14 @@ describe("hermes3d team turn history", () => {
     await expect(run({ agentId: "designer", message: "Draw a logo" })).resolves.toBe("Hi there");
     expect(seenDuringRun).toEqual(["user"]);
     expect(getHistory("agent:designer:main")).toEqual([
-      { role: "user", content: "Draw a logo" },
-      { role: "assistant", content: "Hi there" },
+      expect.objectContaining({ role: "user", content: "Draw a logo" }),
+      expect.objectContaining({ role: "assistant", content: "Hi there" }),
     ]);
+    const msgs = getHistory("agent:designer:main");
+    expect(typeof msgs[0].createdAt).toBe("number");
+    expect(typeof msgs[0].timestamp).toBe("number");
+    expect(typeof msgs[1].createdAt).toBe("number");
+    expect(typeof msgs[1].timestamp).toBe("number");
   });
 
   it("keeps the partial answer and the stop reason when the run fails", async () => {
@@ -54,10 +59,12 @@ describe("hermes3d team turn history", () => {
       })
     );
     await expect(run({ agentId: "designer", message: "t" })).rejects.toThrow("HTTP 500");
-    expect(getHistory("agent:designer:main")[1]).toEqual({
-      role: "assistant",
-      content: "Half done\n\n[Run stopped: Hermes API HTTP 500]",
-    });
+    expect(getHistory("agent:designer:main")[1]).toEqual(
+      expect.objectContaining({
+        role: "assistant",
+        content: "Half done\n\n[Run stopped: Hermes API HTTP 500]",
+      })
+    );
     expect(saveHistory).toHaveBeenCalledTimes(2);
   });
 
@@ -95,7 +102,9 @@ describe("hermes3d team turn history", () => {
       ["agent:c:main", []],
     ]);
     expect(closeDanglingTurns(history)).toBe(1);
-    expect(history.get("agent:a:main")!.at(-1)).toEqual({ role: "assistant", content: DANGLING_NOTE });
+    expect(history.get("agent:a:main")!.at(-1)).toEqual(
+      expect.objectContaining({ role: "assistant", content: DANGLING_NOTE })
+    );
     expect(history.get("agent:b:main")).toHaveLength(2);
   });
 });

@@ -24,7 +24,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { Canvas, useFrame, useThree } from "@react-three/fiber";
+import { Canvas, type ThreeEvent, useFrame, useThree } from "@react-three/fiber";
 import { OrbitControls } from "@react-three/drei";
 import * as THREE from "three";
 import { SettingsPanel } from "@/features/office/components/panels/SettingsPanel";
@@ -58,6 +58,8 @@ import type {
   TaskBoardStatus,
 } from "@/features/office/tasks/types";
 import { extractSpeechImage } from "@/lib/text/speech-image";
+import { isAgentInDisabledTeam, useOptionalTeamStore } from "@/features/teams/store";
+import type { Team } from "@/features/teams/types";
 import { MonitorImmersiveContent as MonitorImmersiveOverlay } from "@/features/retro-office/overlays/MonitorImmersiveContent";
 import {
   BUMP_RECOVERY_MS,
@@ -80,7 +82,7 @@ import {
 import {
   ensureOfficeAtm,
   ensureOfficeBedroom,
-  ensureOfficeGymRoom,
+  purgeOfficeGymRoom,
   ensureOfficeKanbanBoard,
   ensureOfficePhoneBooth,
   ensureOfficePingPongTable,
@@ -121,18 +123,15 @@ import {
   astar,
   buildNavGrid,
   getDeskLocations,
-  getGymWorkoutLocations,
   getJanitorCleaningStops,
   getMeetingSeatLocations,
   getQaLabStations,
-  GYM_DEFAULT_TARGET,
   isLineOfSightClear,
   isNavAreaFree,
   isNavPointFree,
   MEETING_OVERFLOW_LOCATIONS,
   QA_LAB_DEFAULT_TARGET,
   resolveDeskIndexForItem,
-  resolveGymRoute,
   resolvePhoneBoothRoute,
   resolvePingPongTargets,
   resolveQaLabRoute,
@@ -155,16 +154,25 @@ import {
   type ConversationSpeechSample,
 } from "@/features/retro-office/core/conversations";
 import {
+  drainExpiredSpeechTurns,
   enqueueSpeechTurns,
+  filterUnreadArrivals,
+  getSpeechTextKey,
+  getTurnTimestamp,
+  loadReadSpeechKeys,
+  markInitialSnapshotAsRead,
+  persistReadSpeechKey,
   speechTurnDurationMs,
   type SpeechTurn,
 } from "@/features/retro-office/core/speechTurns";
 import { ConversationChatterAudio } from "@/features/retro-office/systems/conversationChatterAudio";
 import {
   loadFurniture,
+  loadAgentPositions,
+  resolveInitialAgentPosition,
+  saveAgentPositions,
   markAtmMigrationApplied,
   markBedroomMigrationApplied,
-  markGymRoomMigrationApplied,
   markPhoneBoothMigrationApplied,
   markQaLabMigrationApplied,
   markSmsBoothMigrationApplied,
@@ -172,6 +180,8 @@ import {
   saveFurniture,
 } from "@/features/retro-office/core/persistence";
 import type {
+  AgentDanceStyle,
+  FacingPoint,
   FurnitureItem,
   JanitorActor,
   OfficeAgent,
@@ -200,21 +210,13 @@ import {
 import {
   AtmMachineModel as InteractiveAtmMachineModel,
   DeviceRackModel as InteractiveDeviceRackModel,
-  DumbbellRackModel as InteractiveDumbbellRackModel,
-  ExerciseBikeModel as InteractiveExerciseBikeModel,
-  KettlebellRackModel as InteractiveKettlebellRackModel,
   PingPongTableModel as MachinePingPongTableModel,
   PhoneBoothModel as InteractivePhoneBoothModel,
-  PunchingBagModel as InteractivePunchingBagModel,
   QaTerminalModel as InteractiveQaTerminalModel,
-  RowingMachineModel as InteractiveRowingMachineModel,
   ServerRackModel as InteractiveServerRackModel,
   ServerTerminalModel as InteractiveServerTerminalModel,
   SmsBoothModel as InteractiveSmsBoothModel,
   TestBenchModel as InteractiveTestBenchModel,
-  TreadmillModel as InteractiveTreadmillModel,
-  WeightBenchModel as InteractiveWeightBenchModel,
-  YogaMatModel as InteractiveYogaMatModel,
 } from "@/features/retro-office/objects/machines";
 import {
   ClockModel as PrimitiveClockModel,
@@ -262,6 +264,11 @@ import {
   HeatmapSystem as AgentHeatmapSystem,
   TrailSystem as AgentTrailSystem,
 } from "@/features/retro-office/systems/visualSystems";
+import {
+  StableAdaptivePerformanceController,
+  downgradeGraphicsQuality,
+  getNextLowerGraphicsQuality,
+} from "@/features/retro-office/systems/performance";
 import type { OfficeCleaningCue } from "@/lib/office/janitorReset";
 
 type OfficeDeskMonitorMap = Record<string, OfficeDeskMonitor>;
@@ -287,7 +294,14 @@ const EMPTY_FEED_EVENTS: FeedEvent[] = [];
 type DragState =
   | { kind: "idle" }
   | { kind: "moving"; uid: string }
-  | { kind: "placing"; itemType: string };
+  | { kind: "placing"; itemType: string }
+  | {
+      kind: "moving_agent";
+      agentId: string;
+      startX: number;
+      startY: number;
+      hasMoved: boolean;
+    };
 
 const SMS_CONTACT_SEED_NAMES = [
   "Avery",
@@ -479,8 +493,10 @@ const EMPTY_FURNITURE_ITEMS: FurnitureItem[] = [];
 
 const ReadOnlyFurnitureClone = memo(function ReadOnlyFurnitureClone({
   furniture,
+  agentsRef,
 }: {
   furniture: FurnitureItem[];
+  agentsRef?: React.RefObject<RenderAgent[]>;
 }) {
   const deskItems = useMemo(
     () => furniture.filter((item) => item.type === "desk_cubicle"),
@@ -507,6 +523,7 @@ const ReadOnlyFurnitureClone = memo(function ReadOnlyFurnitureClone({
           <PrimitiveDoorModel
             key={item._uid}
             item={item}
+            agentsRef={agentsRef}
             isSelected={false}
             isHovered={false}
             editMode={false}
@@ -698,94 +715,6 @@ const ReadOnlyFurnitureClone = memo(function ReadOnlyFurnitureClone({
             onPointerOver={NOOP_FURNITURE_UID_HANDLER}
             onPointerOut={NOOP_FURNITURE_HANDLER}
           />
-        ) : item.type === "treadmill" ? (
-          <InteractiveTreadmillModel
-            key={item._uid}
-            item={item}
-            isSelected={false}
-            isHovered={false}
-            editMode={false}
-            onPointerDown={NOOP_FURNITURE_UID_HANDLER}
-            onPointerOver={NOOP_FURNITURE_UID_HANDLER}
-            onPointerOut={NOOP_FURNITURE_HANDLER}
-          />
-        ) : item.type === "weight_bench" ? (
-          <InteractiveWeightBenchModel
-            key={item._uid}
-            item={item}
-            isSelected={false}
-            isHovered={false}
-            editMode={false}
-            onPointerDown={NOOP_FURNITURE_UID_HANDLER}
-            onPointerOver={NOOP_FURNITURE_UID_HANDLER}
-            onPointerOut={NOOP_FURNITURE_HANDLER}
-          />
-        ) : item.type === "dumbbell_rack" ? (
-          <InteractiveDumbbellRackModel
-            key={item._uid}
-            item={item}
-            isSelected={false}
-            isHovered={false}
-            editMode={false}
-            onPointerDown={NOOP_FURNITURE_UID_HANDLER}
-            onPointerOver={NOOP_FURNITURE_UID_HANDLER}
-            onPointerOut={NOOP_FURNITURE_HANDLER}
-          />
-        ) : item.type === "exercise_bike" ? (
-          <InteractiveExerciseBikeModel
-            key={item._uid}
-            item={item}
-            isSelected={false}
-            isHovered={false}
-            editMode={false}
-            onPointerDown={NOOP_FURNITURE_UID_HANDLER}
-            onPointerOver={NOOP_FURNITURE_UID_HANDLER}
-            onPointerOut={NOOP_FURNITURE_HANDLER}
-          />
-        ) : item.type === "rowing_machine" ? (
-          <InteractiveRowingMachineModel
-            key={item._uid}
-            item={item}
-            isSelected={false}
-            isHovered={false}
-            editMode={false}
-            onPointerDown={NOOP_FURNITURE_UID_HANDLER}
-            onPointerOver={NOOP_FURNITURE_UID_HANDLER}
-            onPointerOut={NOOP_FURNITURE_HANDLER}
-          />
-        ) : item.type === "kettlebell_rack" ? (
-          <InteractiveKettlebellRackModel
-            key={item._uid}
-            item={item}
-            isSelected={false}
-            isHovered={false}
-            editMode={false}
-            onPointerDown={NOOP_FURNITURE_UID_HANDLER}
-            onPointerOver={NOOP_FURNITURE_UID_HANDLER}
-            onPointerOut={NOOP_FURNITURE_HANDLER}
-          />
-        ) : item.type === "punching_bag" ? (
-          <InteractivePunchingBagModel
-            key={item._uid}
-            item={item}
-            isSelected={false}
-            isHovered={false}
-            editMode={false}
-            onPointerDown={NOOP_FURNITURE_UID_HANDLER}
-            onPointerOver={NOOP_FURNITURE_UID_HANDLER}
-            onPointerOut={NOOP_FURNITURE_HANDLER}
-          />
-        ) : item.type === "yoga_mat" ? (
-          <InteractiveYogaMatModel
-            key={item._uid}
-            item={item}
-            isSelected={false}
-            isHovered={false}
-            editMode={false}
-            onPointerDown={NOOP_FURNITURE_UID_HANDLER}
-            onPointerOver={NOOP_FURNITURE_UID_HANDLER}
-            onPointerOut={NOOP_FURNITURE_HANDLER}
-          />
         ) : item.type === "stove" ? (
           <KitchenStoveModel
             key={item._uid}
@@ -841,60 +770,6 @@ const ReadOnlyFurnitureClone = memo(function ReadOnlyFurnitureClone({
   );
 });
 
-function AdaptiveDprController({ maxDpr: maxDprCap = 1.5 }: { maxDpr?: number }) {
-  const { gl, setDpr } = useThree();
-  const currentDprRef = useRef(1.25);
-  const frameCounterRef = useRef(0);
-  const avgDeltaRef = useRef(1 / 60);
-
-  useEffect(() => {
-    const initialDpr = Math.min(window.devicePixelRatio || 1, maxDprCap);
-    currentDprRef.current = initialDpr;
-    setDpr(initialDpr);
-    const handleVisibilityChange = () => {
-      if (document.visibilityState !== "visible") {
-        currentDprRef.current = 0.85;
-        setDpr(0.85);
-        return;
-      }
-      const restoredDpr = Math.min(window.devicePixelRatio || 1, maxDprCap);
-      currentDprRef.current = restoredDpr;
-      setDpr(restoredDpr);
-    };
-    document.addEventListener("visibilitychange", handleVisibilityChange);
-    return () => {
-      document.removeEventListener("visibilitychange", handleVisibilityChange);
-    };
-  }, [setDpr, maxDprCap]);
-
-  useFrame((_, delta) => {
-    if (document.visibilityState !== "visible") return;
-    avgDeltaRef.current = avgDeltaRef.current * 0.92 + delta * 0.08;
-    frameCounterRef.current += 1;
-    if (frameCounterRef.current < 45) return;
-    frameCounterRef.current = 0;
-
-    const maxDpr = Math.min(window.devicePixelRatio || 1, maxDprCap);
-    const minDpr = 0.85;
-    let nextDpr = currentDprRef.current;
-    if (avgDeltaRef.current > 1 / 30) {
-      nextDpr = Math.max(minDpr, currentDprRef.current - 0.15);
-    } else if (avgDeltaRef.current > 1 / 42) {
-      nextDpr = Math.max(minDpr, currentDprRef.current - 0.1);
-    } else if (avgDeltaRef.current < 1 / 57) {
-      nextDpr = Math.min(maxDpr, currentDprRef.current + 0.05);
-    }
-    if (Math.abs(nextDpr - currentDprRef.current) < 0.025) return;
-    if (nextDpr !== currentDprRef.current) {
-      currentDprRef.current = nextDpr;
-      setDpr(Number(nextDpr.toFixed(2)));
-      gl.info.reset();
-    }
-  });
-
-  return null;
-}
-
 // Asset model definitions live in `src/features/retro-office/objects`.
 
 // ============================================================
@@ -906,21 +781,16 @@ function AdaptiveDprController({ maxDpr: maxDprCap = 1.5 }: { maxDpr?: number })
 // concrete targets, paths, and per-frame actor motion.
 function useAgentTick(
   agents: SceneActor[],
-  deskLocations: { x: number; y: number }[],
+  deskLocations: FacingPoint[],
+  savedPositions: Record<string, { x: number; y: number }>,
   assignedDeskIndexByAgentId: Record<string, number> = {},
-  gymWorkoutLocations: {
-    x: number;
-    y: number;
-    facing: number;
-    workoutStyle: "run" | "lift" | "bike" | "box" | "row" | "stretch";
-  }[],
   qaLabStations: QaLabStationLocation[],
   meetingSeatLocations: { x: number; y: number; facing: number }[],
   furnitureRef: React.RefObject<FurnitureItem[]>,
   lastSeenByAgentId: Record<string, number> = {},
   deskHoldByAgentId: Record<string, boolean> = {},
   danceUntilByAgentId: Record<string, number> = {},
-  gymHoldByAgentId: Record<string, boolean> = {},
+  danceStyleByAgentId: Record<string, AgentDanceStyle> = {},
   smsBoothHoldByAgentId: Record<string, boolean> = {},
   phoneBoothHoldByAgentId: Record<string, boolean> = {},
   qaHoldByAgentId: Record<string, boolean> = {},
@@ -932,21 +802,22 @@ function useAgentTick(
   const renderAgentsRef = useRef<RenderAgent[]>([]);
   const renderAgentLookupRef = useRef<Map<string, RenderAgent>>(new Map());
   const deskByAgentRef = useRef<Map<string, number>>(new Map());
-  const gymByAgentRef = useRef<Map<string, number>>(new Map());
   const qaByAgentRef = useRef<Map<string, number>>(new Map());
   const stickyUntilRef = useRef<Map<string, number>>(new Map());
-  const nextGymRef = useRef(0);
   const nextQaRef = useRef(0);
 
   // Nav grid is rebuilt lazily whenever the furniture array reference changes.
   const navGridRef = useRef<NavGrid | null>(null);
   const gridSourceRef = useRef<FurnitureItem[]>([]);
+  const tickFrameRef = useRef(0);
+  const pathCacheRef = useRef<Map<string, { x: number; y: number }[]>>(new Map());
 
   const getNavGrid = useCallback((): NavGrid => {
     const furniture = furnitureRef.current ?? [];
     if (navGridRef.current === null || gridSourceRef.current !== furniture) {
       navGridRef.current = buildNavGrid(furniture);
       gridSourceRef.current = furniture;
+      pathCacheRef.current.clear();
     }
     return navGridRef.current;
   }, [furnitureRef]);
@@ -1021,8 +892,6 @@ function useAgentTick(
     const activeIds = new Set(agents.map((a) => a.id));
     for (const id of deskByAgentRef.current.keys())
       if (!activeIds.has(id)) deskByAgentRef.current.delete(id);
-    for (const id of gymByAgentRef.current.keys())
-      if (!activeIds.has(id)) gymByAgentRef.current.delete(id);
     for (const id of qaByAgentRef.current.keys())
       if (!activeIds.has(id)) qaByAgentRef.current.delete(id);
     for (const id of stickyUntilRef.current.keys())
@@ -1126,13 +995,6 @@ function useAgentTick(
       } else {
         deskByAgentRef.current.delete(agent.id);
       }
-      if (!gymByAgentRef.current.has(agent.id)) {
-        gymByAgentRef.current.set(
-          agent.id,
-          nextGymRef.current % Math.max(gymWorkoutLocations.length, 1),
-        );
-        nextGymRef.current += 1;
-      }
       if (!qaByAgentRef.current.has(agent.id)) {
         qaByAgentRef.current.set(
           agent.id,
@@ -1141,22 +1003,10 @@ function useAgentTick(
         nextQaRef.current += 1;
       }
       const explicitDeskHold = Boolean(deskHoldByAgentId[agent.id]);
-      const explicitGymHold = Boolean(gymHoldByAgentId[agent.id]);
       const explicitSmsBoothHold = Boolean(smsBoothHoldByAgentId[agent.id]);
       const explicitPhoneBoothHold = Boolean(phoneBoothHoldByAgentId[agent.id]);
       const explicitQaHold = Boolean(qaHoldByAgentId[agent.id]);
       const explicitGithubHold = Boolean(githubReviewByAgentId[agent.id]);
-      if (
-        explicitGymHold &&
-        gymWorkoutLocations.length > 0 &&
-        existing?.interactionTarget !== "gym"
-      ) {
-        gymByAgentRef.current.set(
-          agent.id,
-          nextGymRef.current % Math.max(gymWorkoutLocations.length, 1),
-        );
-        nextGymRef.current += 1;
-      }
       if (
         explicitQaHold &&
         qaLabStations.length > 0 &&
@@ -1169,9 +1019,6 @@ function useAgentTick(
         nextQaRef.current += 1;
       }
       const deskIdx = deskByAgentRef.current.get(agent.id);
-      const gymIdx =
-        gymByAgentRef.current.get(agent.id) ??
-        idx % Math.max(gymWorkoutLocations.length, 1);
       const qaIdx =
         qaByAgentRef.current.get(agent.id) ??
         idx % Math.max(qaLabStations.length, 1);
@@ -1187,7 +1034,6 @@ function useAgentTick(
       if (!deskPos) {
         stickyUntilRef.current.delete(agent.id);
       }
-      const gymWorkoutPos = gymWorkoutLocations[gymIdx] ?? GYM_DEFAULT_TARGET;
       const qaStationPos = qaLabStations[qaIdx] ?? {
         ...QA_LAB_DEFAULT_TARGET,
         stationType: "console" as const,
@@ -1214,7 +1060,6 @@ function useAgentTick(
           ? "error"
           : explicitMeetingHold ||
               explicitDeskHold ||
-              explicitGymHold ||
               explicitSmsBoothHold ||
               explicitPhoneBoothHold ||
               explicitQaHold ||
@@ -1263,10 +1108,8 @@ function useAgentTick(
           ns.interactionTarget = "meeting_room";
           ns.phoneBoothStage = undefined;
           ns.serverRoomStage = undefined;
-          ns.gymStage = undefined;
           ns.qaLabStage = undefined;
           ns.qaLabStationType = undefined;
-          ns.workoutStyle = undefined;
           const targetChanged =
             existing.targetX !== meetingTarget.x ||
             existing.targetY !== meetingTarget.y ||
@@ -1317,10 +1160,8 @@ function useAgentTick(
           );
           ns.phoneBoothStage = undefined;
           ns.serverRoomStage = undefined;
-          ns.gymStage = undefined;
           ns.qaLabStage = undefined;
           ns.qaLabStationType = undefined;
-          ns.workoutStyle = undefined;
           const targetChanged =
             existing.targetX !== conversationSlot.x ||
             existing.targetY !== conversationSlot.y ||
@@ -1339,60 +1180,16 @@ function useAgentTick(
               conversationSlot.x,
               conversationSlot.y,
             );
-            ns.state = arrivedAtCircle ? "standing" : "walking";
+            ns.state =
+              arrivedAtCircle || !ns.path || ns.path.length === 0
+                ? "standing"
+                : "walking";
           } else if (arrivedAtCircle) {
             ns.state = "standing";
           }
           // Not arrived and target unchanged: the tick owns movement; forcing
           // "walking" here would flap agents whose slot is briefly unreachable.
           if (arrivedAtCircle) ns.facing = conversationSlot.facing;
-        } else if (explicitGymHold) {
-          const gymRoute = resolveGymRoute(
-            existing.x,
-            existing.y,
-            gymWorkoutPos,
-          );
-          ns.pingPongUntil = undefined;
-          ns.pingPongTargetX = undefined;
-          ns.pingPongTargetY = undefined;
-          ns.pingPongFacing = undefined;
-          ns.pingPongPartnerId = undefined;
-          ns.pingPongTableUid = undefined;
-          ns.pingPongSide = undefined;
-          ns.walkSpeed =
-            existing.pingPongPreviousWalkSpeed ?? existing.walkSpeed;
-          ns.pingPongPreviousWalkSpeed = undefined;
-          ns.interactionTarget = "gym";
-          ns.phoneBoothStage = undefined;
-          ns.serverRoomStage = undefined;
-          ns.gymStage = gymRoute.stage;
-          ns.qaLabStage = undefined;
-          ns.qaLabStationType = undefined;
-          ns.workoutStyle = gymWorkoutPos.workoutStyle;
-          const targetChanged =
-            existing.targetX !== gymRoute.targetX ||
-            existing.targetY !== gymRoute.targetY ||
-            existing.gymStage !== gymRoute.stage;
-          ns.targetX = gymRoute.targetX;
-          ns.targetY = gymRoute.targetY;
-          if (targetChanged) {
-            ns.path = planPath(
-              existing.x,
-              existing.y,
-              gymRoute.targetX,
-              gymRoute.targetY,
-            );
-          }
-          ns.state =
-            Math.hypot(
-              existing.x - gymRoute.targetX,
-              existing.y - gymRoute.targetY,
-            ) < 15
-              ? gymRoute.stage === "workout"
-                ? "working_out"
-                : "standing"
-              : "walking";
-          ns.facing = gymRoute.facing;
         } else if (explicitQaHold) {
           const qaLabRoute = resolveQaLabRoute(
             existing.x,
@@ -1412,10 +1209,8 @@ function useAgentTick(
           ns.interactionTarget = "qa_lab";
           ns.phoneBoothStage = undefined;
           ns.serverRoomStage = undefined;
-          ns.gymStage = undefined;
           ns.qaLabStage = qaLabRoute.stage;
           ns.qaLabStationType = qaStationPos.stationType;
-          ns.workoutStyle = undefined;
           const targetChanged =
             existing.targetX !== qaLabRoute.targetX ||
             existing.targetY !== qaLabRoute.targetY ||
@@ -1456,10 +1251,8 @@ function useAgentTick(
           ns.interactionTarget = "server_room";
           ns.phoneBoothStage = undefined;
           ns.serverRoomStage = serverRoomRoute.stage;
-          ns.gymStage = undefined;
           ns.qaLabStage = undefined;
           ns.qaLabStationType = undefined;
-          ns.workoutStyle = undefined;
           const targetChanged =
             existing.targetX !== serverRoomRoute.targetX ||
             existing.targetY !== serverRoomRoute.targetY ||
@@ -1502,10 +1295,8 @@ function useAgentTick(
           ns.smsBoothStage = smsBoothRoute.stage;
           ns.phoneBoothStage = undefined;
           ns.serverRoomStage = undefined;
-          ns.gymStage = undefined;
           ns.qaLabStage = undefined;
           ns.qaLabStationType = undefined;
-          ns.workoutStyle = undefined;
           const targetChanged =
             existing.targetX !== smsBoothRoute.targetX ||
             existing.targetY !== smsBoothRoute.targetY ||
@@ -1547,10 +1338,8 @@ function useAgentTick(
           ns.interactionTarget = "phone_booth";
           ns.phoneBoothStage = phoneBoothRoute.stage;
           ns.serverRoomStage = undefined;
-          ns.gymStage = undefined;
           ns.qaLabStage = undefined;
           ns.qaLabStationType = undefined;
-          ns.workoutStyle = undefined;
           const targetChanged =
             existing.targetX !== phoneBoothRoute.targetX ||
             existing.targetY !== phoneBoothRoute.targetY ||
@@ -1587,10 +1376,8 @@ function useAgentTick(
           ns.interactionTarget = deskPos ? "desk" : undefined;
           ns.phoneBoothStage = undefined;
           ns.serverRoomStage = undefined;
-          ns.gymStage = undefined;
           ns.qaLabStage = undefined;
           ns.qaLabStationType = undefined;
-          ns.workoutStyle = undefined;
           if (deskPos) {
             const targetChanged =
               existing.targetX !== deskPos.x || existing.targetY !== deskPos.y;
@@ -1598,10 +1385,16 @@ function useAgentTick(
             ns.targetY = deskPos.y;
             if (targetChanged)
               ns.path = planPath(existing.x, existing.y, deskPos.x, deskPos.y);
-            ns.state =
-              Math.hypot(existing.x - deskPos.x, existing.y - deskPos.y) < 20
-                ? "sitting"
-                : "walking";
+            const isNearDesk =
+              Math.hypot(existing.x - deskPos.x, existing.y - deskPos.y) < 20;
+            if (isNearDesk) {
+              ns.state = "sitting";
+              ns.facing = deskPos.facing ?? Math.PI;
+            } else if (!targetChanged && existing.path.length === 0) {
+              ns.state = existing.state === "sitting" ? "sitting" : "standing";
+            } else {
+              ns.state = "walking";
+            }
           } else {
             ns.targetX = existing.x;
             ns.targetY = existing.y;
@@ -1622,10 +1415,8 @@ function useAgentTick(
           ns.interactionTarget = undefined;
           ns.phoneBoothStage = undefined;
           ns.serverRoomStage = undefined;
-          ns.gymStage = undefined;
           ns.qaLabStage = undefined;
           ns.qaLabStationType = undefined;
-          ns.workoutStyle = undefined;
           ns.targetX = existing.x;
           ns.targetY = existing.y;
           ns.path = [];
@@ -1647,11 +1438,6 @@ function useAgentTick(
               existing.x,
               existing.y,
             );
-            const gymRoute = resolveGymRoute(
-              existing.x,
-              existing.y,
-              gymWorkoutPos,
-            );
             const qaLabRoute = resolveQaLabRoute(
               existing.x,
               existing.y,
@@ -1660,33 +1446,29 @@ function useAgentTick(
             const nextTarget =
               explicitMeetingHold && meetingTarget
                 ? { x: meetingTarget.x, y: meetingTarget.y }
-                : explicitGymHold
-                  ? { x: gymRoute.targetX, y: gymRoute.targetY }
-                  : explicitSmsBoothHold
+                : explicitSmsBoothHold
+                  ? {
+                      x: smsBoothRoute.targetX,
+                      y: smsBoothRoute.targetY,
+                    }
+                  : explicitPhoneBoothHold
                     ? {
-                        x: smsBoothRoute.targetX,
-                        y: smsBoothRoute.targetY,
+                        x: phoneBoothRoute.targetX,
+                        y: phoneBoothRoute.targetY,
                       }
-                    : explicitPhoneBoothHold
-                      ? {
-                          x: phoneBoothRoute.targetX,
-                          y: phoneBoothRoute.targetY,
-                        }
-                      : explicitQaHold
-                        ? { x: qaLabRoute.targetX, y: qaLabRoute.targetY }
-                        : explicitGithubHold
-                          ? {
-                              x: serverRoomRoute.targetX,
-                              y: serverRoomRoute.targetY,
-                            }
-                          : deskPos;
+                    : explicitQaHold
+                      ? { x: qaLabRoute.targetX, y: qaLabRoute.targetY }
+                      : explicitGithubHold
+                        ? {
+                            x: serverRoomRoute.targetX,
+                            y: serverRoomRoute.targetY,
+                          }
+                        : deskPos;
             if (!nextTarget) {
               ns.interactionTarget = undefined;
               ns.serverRoomStage = undefined;
-              ns.gymStage = undefined;
               ns.qaLabStage = undefined;
               ns.qaLabStationType = undefined;
-              ns.workoutStyle = undefined;
               ns.targetX = existing.x;
               ns.targetY = existing.y;
               ns.path = [];
@@ -1700,44 +1482,34 @@ function useAgentTick(
             }
             ns.interactionTarget = explicitMeetingHold
               ? "meeting_room"
-              : explicitGymHold
-                ? "gym"
-                : explicitSmsBoothHold
-                  ? "sms_booth"
-                  : explicitPhoneBoothHold
-                    ? "phone_booth"
-                    : explicitQaHold
-                      ? "qa_lab"
-                      : explicitGithubHold
-                        ? "server_room"
-                        : "desk";
+              : explicitSmsBoothHold
+                ? "sms_booth"
+                : explicitPhoneBoothHold
+                  ? "phone_booth"
+                  : explicitQaHold
+                    ? "qa_lab"
+                    : explicitGithubHold
+                      ? "server_room"
+                      : "desk";
             ns.phoneBoothStage =
               explicitMeetingHold ||
-              explicitGymHold ||
               explicitSmsBoothHold ||
               !explicitPhoneBoothHold
                 ? undefined
                 : phoneBoothRoute.stage;
             ns.smsBoothStage =
-              explicitMeetingHold || explicitGymHold || !explicitSmsBoothHold
+              explicitMeetingHold || !explicitSmsBoothHold
                 ? undefined
                 : smsBoothRoute.stage;
             ns.serverRoomStage = explicitMeetingHold
               ? undefined
-              : explicitGymHold
+              : explicitSmsBoothHold
                 ? undefined
-                : explicitSmsBoothHold
+                : explicitPhoneBoothHold
                   ? undefined
-                  : explicitPhoneBoothHold
-                    ? undefined
-                    : explicitGithubHold
-                      ? serverRoomRoute.stage
-                      : undefined;
-            ns.gymStage = explicitMeetingHold
-              ? undefined
-              : explicitGymHold
-                ? gymRoute.stage
-                : undefined;
+                  : explicitGithubHold
+                    ? serverRoomRoute.stage
+                    : undefined;
             ns.qaLabStage = explicitMeetingHold
               ? undefined
               : explicitSmsBoothHold
@@ -1749,9 +1521,6 @@ function useAgentTick(
                     : undefined;
             ns.qaLabStationType = explicitQaHold
               ? qaStationPos.stationType
-              : undefined;
-            ns.workoutStyle = explicitGymHold
-              ? gymWorkoutPos.workoutStyle
               : undefined;
             ns.targetX = nextTarget.x;
             ns.targetY = nextTarget.y;
@@ -1773,10 +1542,8 @@ function useAgentTick(
             ns.smsBoothStage = undefined;
             ns.phoneBoothStage = undefined;
             ns.serverRoomStage = undefined;
-            ns.gymStage = undefined;
             ns.qaLabStage = undefined;
             ns.qaLabStationType = undefined;
-            ns.workoutStyle = undefined;
             ns.targetX = existing.x;
             ns.targetY = existing.y;
             ns.path = [];
@@ -1786,10 +1553,8 @@ function useAgentTick(
             ns.smsBoothStage = undefined;
             ns.phoneBoothStage = undefined;
             ns.serverRoomStage = undefined;
-            ns.gymStage = undefined;
             ns.qaLabStage = undefined;
             ns.qaLabStationType = undefined;
-            ns.workoutStyle = undefined;
             const r = pickRoamPoint(agent.id);
             if (isNavPointFree(getNavGrid(), r.x, r.y)) {
               const path = planPath(existing.x, existing.y, r.x, r.y);
@@ -1810,11 +1575,20 @@ function useAgentTick(
         }
       } else {
         // New agent — spawn at a random position and plan path to first target.
-        const { x: sx, y: sy } = pickSpawnPoint(agent.id);
+        const { x: spawnX, y: spawnY } = pickSpawnPoint(agent.id);
+        const { x: sx, y: sy } = resolveInitialAgentPosition(
+          agent.id,
+          effectiveStatus,
+          Boolean(
+            assignedDeskIndexByAgentId[agent.id] !== undefined ||
+              deskHoldByAgentId[agent.id],
+          ),
+          savedPositions,
+          { x: spawnX, y: spawnY },
+        );
         const serverRoomRoute = resolveServerRoomRoute(sx, sy);
         const smsBoothRoute = resolveSmsBoothRoute(smsBoothItem, sx, sy);
         const phoneBoothRoute = resolvePhoneBoothRoute(phoneBoothItem, sx, sy);
-        const gymRoute = resolveGymRoute(sx, sy, gymWorkoutPos);
         const qaLabRoute = resolveQaLabRoute(sx, sy, qaStationPos);
         const initialTarget =
           effectiveStatus === "working"
@@ -1823,32 +1597,27 @@ function useAgentTick(
                   x: meetingTarget.x,
                   y: meetingTarget.y,
                 }
-              : explicitGymHold
+              : explicitSmsBoothHold
                 ? {
-                    x: gymRoute.targetX,
-                    y: gymRoute.targetY,
+                    x: smsBoothRoute.targetX,
+                    y: smsBoothRoute.targetY,
                   }
-                : explicitSmsBoothHold
+                : explicitPhoneBoothHold
                   ? {
-                      x: smsBoothRoute.targetX,
-                      y: smsBoothRoute.targetY,
+                      x: phoneBoothRoute.targetX,
+                      y: phoneBoothRoute.targetY,
                     }
-                  : explicitPhoneBoothHold
+                  : explicitQaHold
                     ? {
-                        x: phoneBoothRoute.targetX,
-                        y: phoneBoothRoute.targetY,
+                        x: qaLabRoute.targetX,
+                        y: qaLabRoute.targetY,
                       }
-                    : explicitQaHold
+                    : explicitGithubHold
                       ? {
-                          x: qaLabRoute.targetX,
-                          y: qaLabRoute.targetY,
+                          x: serverRoomRoute.targetX,
+                          y: serverRoomRoute.targetY,
                         }
-                      : explicitGithubHold
-                        ? {
-                            x: serverRoomRoute.targetX,
-                            y: serverRoomRoute.targetY,
-                          }
-                        : (deskPos ?? { x: sx, y: sy })
+                      : (deskPos ?? { x: sx, y: sy })
             : { x: sx, y: sy };
         ns = {
           x: sx,
@@ -1862,7 +1631,6 @@ function useAgentTick(
           state:
             effectiveStatus === "working" &&
             (explicitMeetingHold ||
-              explicitGymHold ||
               explicitSmsBoothHold ||
               explicitPhoneBoothHold ||
               explicitQaHold ||
@@ -1872,42 +1640,34 @@ function useAgentTick(
               : "standing",
           interactionTarget: explicitMeetingHold
             ? "meeting_room"
-            : explicitGymHold
-              ? "gym"
-              : explicitSmsBoothHold
-                ? "sms_booth"
-                : explicitPhoneBoothHold
-                  ? "phone_booth"
-                  : explicitQaHold
-                    ? "qa_lab"
-                    : explicitGithubHold
-                      ? "server_room"
-                      : deskPos
-                        ? "desk"
-                        : undefined,
+            : explicitSmsBoothHold
+              ? "sms_booth"
+              : explicitPhoneBoothHold
+                ? "phone_booth"
+                : explicitQaHold
+                  ? "qa_lab"
+                  : explicitGithubHold
+                    ? "server_room"
+                    : deskPos
+                      ? "desk"
+                      : undefined,
           smsBoothStage:
-            explicitMeetingHold || explicitGymHold || !explicitSmsBoothHold
+            explicitMeetingHold || !explicitSmsBoothHold
               ? undefined
               : smsBoothRoute.stage,
           phoneBoothStage:
             explicitMeetingHold ||
-            explicitGymHold ||
             explicitSmsBoothHold ||
             !explicitPhoneBoothHold
               ? undefined
               : phoneBoothRoute.stage,
           serverRoomStage:
             explicitMeetingHold ||
-            explicitGymHold ||
             explicitSmsBoothHold ||
             explicitPhoneBoothHold ||
             !explicitGithubHold
               ? undefined
               : serverRoomRoute.stage,
-          gymStage:
-            explicitMeetingHold || !explicitGymHold
-              ? undefined
-              : gymRoute.stage,
           qaLabStage:
             explicitMeetingHold ||
             explicitSmsBoothHold ||
@@ -1917,9 +1677,6 @@ function useAgentTick(
               : qaLabRoute.stage,
           qaLabStationType: explicitQaHold
             ? qaStationPos.stationType
-            : undefined,
-          workoutStyle: explicitGymHold
-            ? gymWorkoutPos.workoutStyle
             : undefined,
           facing:
             explicitMeetingHold && meetingTarget
@@ -1944,8 +1701,6 @@ function useAgentTick(
     deskLocations,
     furnitureRef,
     getNavGrid,
-    gymHoldByAgentId,
-    gymWorkoutLocations,
     smsBoothHoldByAgentId,
     phoneBoothHoldByAgentId,
     qaHoldByAgentId,
@@ -1963,8 +1718,29 @@ function useAgentTick(
 
   // Tick called each frame — follows A* waypoints, no React state.
   const tick = () => {
+    tickFrameRef.current += 1;
+    const isCollisionCheckFrame = tickFrameRef.current % 3 === 0;
     const grid = getNavGrid();
     const now = Date.now();
+    let astarBudget = 2;
+
+    const findPathThrottled = (
+      sx: number,
+      sy: number,
+      ex: number,
+      ey: number,
+    ): { x: number; y: number }[] | null => {
+      const key = `${Math.round(sx / SNAP_GRID)}_${Math.round(sy / SNAP_GRID)}->${Math.round(ex / SNAP_GRID)}_${Math.round(ey / SNAP_GRID)}`;
+      const cached = pathCacheRef.current.get(key);
+      if (cached) return cached;
+      if (astarBudget <= 0) return null;
+      astarBudget -= 1;
+      const computed = astar(sx, sy, ex, ey, grid);
+      if (pathCacheRef.current.size > 200) pathCacheRef.current.clear();
+      pathCacheRef.current.set(key, computed);
+      return computed;
+    };
+
     const furnitureItems = furnitureRef.current ?? [];
     const smsBoothItem =
       furnitureItems.find((item) => item.type === "sms_booth") ?? null;
@@ -1982,77 +1758,81 @@ function useAgentTick(
     const awayFurniture = socialFurniture.filter((item) =>
       ["couch", "couch_v", "beanbag"].includes(item.type),
     );
-    const moved = renderAgentsRef.current.map((agent) => {
+    const agents = renderAgentsRef.current;
+    for (let agentIndex = 0; agentIndex < agents.length; agentIndex += 1) {
+      const agent = agents[agentIndex];
       const isJanitor = "role" in agent && agent.role === "janitor";
       if (isJanitor && agent.janitorPauseUntil !== undefined) {
         if (now < agent.janitorPauseUntil) {
-          return {
-            ...agent,
-            state: "standing" as const,
-            frame: agent.frame + 1,
-          };
+          agent.state = "standing";
+          agent.frame += 1;
+          continue;
         }
         const nextRouteIndex = (agent.janitorRouteIndex ?? 0) + 1;
         const nextTarget = agent.janitorRoute[nextRouteIndex];
         if (!nextTarget) {
-          return {
-            ...agent,
-            janitorPauseUntil: undefined,
-            state: "standing" as const,
-            frame: agent.frame + 1,
-          };
+          agent.janitorPauseUntil = undefined;
+          agent.state = "standing";
+          agent.frame += 1;
+          continue;
         }
-        return {
-          ...agent,
-          janitorPauseUntil: undefined,
-          janitorRouteIndex: nextRouteIndex,
-          targetX: nextTarget.x,
-          targetY: nextTarget.y,
-          path: astar(agent.x, agent.y, nextTarget.x, nextTarget.y, grid),
-          facing: nextTarget.facing,
-          state: "walking" as const,
-          frame: agent.frame + 1,
-        };
+        const janitorPath = findPathThrottled(agent.x, agent.y, nextTarget.x, nextTarget.y);
+        if (!janitorPath || janitorPath.length === 0) {
+          agent.janitorPauseUntil = now + 35;
+          agent.state = "standing";
+          agent.frame += 1;
+          continue;
+        }
+        agent.janitorPauseUntil = undefined;
+        agent.janitorRouteIndex = nextRouteIndex;
+        agent.targetX = nextTarget.x;
+        agent.targetY = nextTarget.y;
+        agent.path = janitorPath;
+        agent.facing = nextTarget.facing;
+        agent.state = "walking";
+        agent.frame += 1;
+        continue;
       }
       if (agent.pingPongUntil !== undefined && now >= agent.pingPongUntil) {
-        return {
-          ...agent,
-          walkSpeed: agent.pingPongPreviousWalkSpeed ?? agent.walkSpeed,
-          pingPongUntil: undefined,
-          pingPongTargetX: undefined,
-          pingPongTargetY: undefined,
-          pingPongFacing: undefined,
-          pingPongPartnerId: undefined,
-          pingPongTableUid: undefined,
-          pingPongSide: undefined,
-          pingPongPreviousWalkSpeed: undefined,
-          targetX: agent.x,
-          targetY: agent.y,
-          path: [],
-          state: "standing" as const,
-          frame: agent.frame + 1,
-        };
+        agent.walkSpeed = agent.pingPongPreviousWalkSpeed ?? agent.walkSpeed;
+        agent.pingPongUntil = undefined;
+        agent.pingPongTargetX = undefined;
+        agent.pingPongTargetY = undefined;
+        agent.pingPongFacing = undefined;
+        agent.pingPongPartnerId = undefined;
+        agent.pingPongTableUid = undefined;
+        agent.pingPongSide = undefined;
+        agent.pingPongPreviousWalkSpeed = undefined;
+        agent.targetX = agent.x;
+        agent.targetY = agent.y;
+        agent.path = [];
+        agent.state = "standing";
+        agent.frame += 1;
+        continue;
       }
       // Bumped agents are frozen: legs stop, no movement.
       // When the timer expires, resume walking from the same spot and briefly
       // ignore further collisions so both agents can peel away cleanly.
       if (agent.bumpedUntil !== undefined) {
         if (now < agent.bumpedUntil) {
-          return {
-            ...agent,
-            state: "standing" as const,
-            frame: agent.frame + 1,
-          };
+          agent.state = "standing";
+          agent.frame += 1;
+          continue;
         }
-        return {
-          ...agent,
-          bumpedUntil: undefined,
-          bumpTalkUntil: undefined,
-          collisionCooldownUntil: now + BUMP_RECOVERY_MS,
-          state: "walking" as const,
-          path: astar(agent.x, agent.y, agent.targetX, agent.targetY, grid),
-          frame: agent.frame + 1,
-        };
+        const resumePath = findPathThrottled(agent.x, agent.y, agent.targetX, agent.targetY);
+        if (!resumePath || resumePath.length === 0) {
+          agent.bumpedUntil = now + 35;
+          agent.state = "standing";
+          agent.frame += 1;
+          continue;
+        }
+        agent.bumpedUntil = undefined;
+        agent.bumpTalkUntil = undefined;
+        agent.collisionCooldownUntil = now + BUMP_RECOVERY_MS;
+        agent.state = "walking";
+        agent.path = resumePath;
+        agent.frame += 1;
+        continue;
       }
       // Conversation huddle upkeep. Liveness comes from the expiry ref so an
       // ongoing chat keeps the circle without any React re-render.
@@ -2061,28 +1841,26 @@ function useAgentTick(
         (conversationExpiryRef?.current?.get(agent.conversationGroupId) ?? 0) >
           now;
       if (agent.conversationGroupId !== undefined && !conversationLive) {
-        return {
-          ...agent,
-          conversationGroupId: undefined,
-          conversationTargetX: undefined,
-          conversationTargetY: undefined,
-          conversationFacing: undefined,
-          conversationSeatIndex: undefined,
-          conversationSize: undefined,
-          conversationReplanAtMs: undefined,
-          walkSpeed: agent.conversationPreviousWalkSpeed ?? agent.walkSpeed,
-          conversationPreviousWalkSpeed: undefined,
-          interactionTarget:
-            agent.interactionTarget === "conversation"
-              ? undefined
-              : agent.interactionTarget,
-          bumpTalkUntil: undefined,
-          targetX: agent.x,
-          targetY: agent.y,
-          path: [],
-          state: "standing" as const,
-          frame: agent.frame + 1,
-        };
+        agent.conversationGroupId = undefined;
+        agent.conversationTargetX = undefined;
+        agent.conversationTargetY = undefined;
+        agent.conversationFacing = undefined;
+        agent.conversationSeatIndex = undefined;
+        agent.conversationSize = undefined;
+        agent.conversationReplanAtMs = undefined;
+        agent.walkSpeed = agent.conversationPreviousWalkSpeed ?? agent.walkSpeed;
+        agent.conversationPreviousWalkSpeed = undefined;
+        agent.interactionTarget =
+          agent.interactionTarget === "conversation"
+            ? undefined
+            : agent.interactionTarget;
+        agent.bumpTalkUntil = undefined;
+        agent.targetX = agent.x;
+        agent.targetY = agent.y;
+        agent.path = [];
+        agent.state = "standing";
+        agent.frame += 1;
+        continue;
       }
       // A huddle must not dissolve while its members are still walking over —
       // on slow machines the walk can outlast the speech window. Extend the
@@ -2110,20 +1888,19 @@ function useAgentTick(
         (agent.targetX !== agent.conversationTargetX ||
           agent.targetY !== agent.conversationTargetY)
       ) {
-        return {
-          ...agent,
-          targetX: agent.conversationTargetX,
-          targetY: agent.conversationTargetY,
-          path: astar(
+        const path =
+          findPathThrottled(
             agent.x,
             agent.y,
             agent.conversationTargetX,
             agent.conversationTargetY,
-            grid,
-          ),
-          state: "walking" as const,
-          frame: agent.frame + 1,
-        };
+          ) ?? [];
+        agent.targetX = agent.conversationTargetX;
+        agent.targetY = agent.conversationTargetY;
+        agent.path = path;
+        agent.state = path.length === 0 ? "standing" : "walking";
+        agent.frame += 1;
+        continue;
       }
       const baseSpeed = agent.walkSpeed ?? WALK_SPEED;
       const speed =
@@ -2158,7 +1935,8 @@ function useAgentTick(
         nx = wpX;
         ny = wpY;
         if (path.length > 1) {
-          npath = path.slice(1);
+          path.shift();
+          npath = path;
           ns = "walking";
         } else {
           npath = [];
@@ -2166,19 +1944,17 @@ function useAgentTick(
             const routeIndex = agent.janitorRouteIndex ?? 0;
             const currentStop =
               agent.janitorRoute[routeIndex] ?? agent.janitorRoute.at(-1);
-            return {
-              ...agent,
-              x: nx,
-              y: ny,
-              facing: currentStop?.facing ?? nf,
-              state: "standing" as const,
-              path: [],
-              janitorPauseUntil:
-                routeIndex < agent.janitorRoute.length - 1
-                  ? now + agent.janitorPauseMs
-                  : undefined,
-              frame: agent.frame + 1,
-            };
+            agent.x = nx;
+            agent.y = ny;
+            agent.facing = currentStop?.facing ?? nf;
+            agent.state = "standing";
+            agent.path = [];
+            agent.janitorPauseUntil =
+              routeIndex < agent.janitorRoute.length - 1
+                ? now + agent.janitorPauseMs
+                : undefined;
+            agent.frame += 1;
+            continue;
           }
           if (agent.pingPongUntil !== undefined) {
             nx = agent.pingPongTargetX ?? nx;
@@ -2195,35 +1971,30 @@ function useAgentTick(
               // Path exhausted away from the slot (blocked route, earlier
               // detour): retry occasionally instead of standing stranded.
               // If A* finds no route, hold position instead of clipping through obstacles.
-              const planned = astar(
+              const planned = findPathThrottled(
                 nx,
                 ny,
                 agent.conversationTargetX,
                 slotY,
-                grid,
               );
-              if (planned.length === 0) {
-                return {
-                  ...agent,
-                  x: nx,
-                  y: ny,
-                  conversationReplanAtMs: now + 1_500,
-                  path: [],
-                  state: "standing" as const,
-                  frame: agent.frame + 1,
-                };
+              if (!planned || planned.length === 0) {
+                agent.x = nx;
+                agent.y = ny;
+                agent.conversationReplanAtMs = now + 1_500;
+                agent.path = [];
+                agent.state = "standing";
+                agent.frame += 1;
+                continue;
               }
-              return {
-                ...agent,
-                x: nx,
-                y: ny,
-                conversationReplanAtMs: now + 1_500,
-                targetX: agent.conversationTargetX,
-                targetY: slotY,
-                path: planned,
-                state: "walking" as const,
-                frame: agent.frame + 1,
-              };
+              agent.x = nx;
+              agent.y = ny;
+              agent.conversationReplanAtMs = now + 1_500;
+              agent.targetX = agent.conversationTargetX;
+              agent.targetY = slotY;
+              agent.path = planned;
+              agent.state = "walking";
+              agent.frame += 1;
+              continue;
             }
             // Standing in the huddle: face the centre and take talking turns
             // so the chatter bubble hops around the circle.
@@ -2244,24 +2015,23 @@ function useAgentTick(
                 nx,
                 ny,
               );
-              return {
-                ...agent,
-                x: nx,
-                y: ny,
-                targetX: nextSmsBoothRoute.targetX,
-                targetY: nextSmsBoothRoute.targetY,
-                path: astar(
+              const path =
+                findPathThrottled(
                   nx,
                   ny,
                   nextSmsBoothRoute.targetX,
                   nextSmsBoothRoute.targetY,
-                  grid,
-                ),
-                facing: nextSmsBoothRoute.facing,
-                state: "walking" as const,
-                smsBoothStage: nextSmsBoothRoute.stage,
-                frame: agent.frame + 1,
-              };
+                ) ?? [];
+              agent.x = nx;
+              agent.y = ny;
+              agent.targetX = nextSmsBoothRoute.targetX;
+              agent.targetY = nextSmsBoothRoute.targetY;
+              agent.path = path;
+              agent.facing = nextSmsBoothRoute.facing;
+              agent.state = path.length === 0 ? "standing" : "walking";
+              agent.smsBoothStage = nextSmsBoothRoute.stage;
+              agent.frame += 1;
+              continue;
             }
             if (
               agent.interactionTarget === "phone_booth" &&
@@ -2272,75 +2042,46 @@ function useAgentTick(
                 nx,
                 ny,
               );
-              return {
-                ...agent,
-                x: nx,
-                y: ny,
-                targetX: nextPhoneBoothRoute.targetX,
-                targetY: nextPhoneBoothRoute.targetY,
-                path: astar(
+              const path =
+                findPathThrottled(
                   nx,
                   ny,
                   nextPhoneBoothRoute.targetX,
                   nextPhoneBoothRoute.targetY,
-                  grid,
-                ),
-                facing: nextPhoneBoothRoute.facing,
-                state: "walking" as const,
-                phoneBoothStage: nextPhoneBoothRoute.stage,
-                frame: agent.frame + 1,
-              };
+                ) ?? [];
+              agent.x = nx;
+              agent.y = ny;
+              agent.targetX = nextPhoneBoothRoute.targetX;
+              agent.targetY = nextPhoneBoothRoute.targetY;
+              agent.path = path;
+              agent.facing = nextPhoneBoothRoute.facing;
+              agent.state = path.length === 0 ? "standing" : "walking";
+              agent.phoneBoothStage = nextPhoneBoothRoute.stage;
+              agent.frame += 1;
+              continue;
             }
             if (
               agent.interactionTarget === "server_room" &&
               agent.serverRoomStage !== "terminal"
             ) {
               const nextServerRoomRoute = resolveServerRoomRoute(nx, ny);
-              return {
-                ...agent,
-                x: nx,
-                y: ny,
-                targetX: nextServerRoomRoute.targetX,
-                targetY: nextServerRoomRoute.targetY,
-                path: astar(
+              const path =
+                findPathThrottled(
                   nx,
                   ny,
                   nextServerRoomRoute.targetX,
                   nextServerRoomRoute.targetY,
-                  grid,
-                ),
-                facing: nextServerRoomRoute.facing,
-                state: "walking" as const,
-                serverRoomStage: nextServerRoomRoute.stage,
-                frame: agent.frame + 1,
-              };
-            }
-            if (
-              agent.interactionTarget === "gym" &&
-              agent.gymStage !== "workout"
-            ) {
-              const gymIdx = gymByAgentRef.current.get(agent.id) ?? 0;
-              const workoutTarget =
-                gymWorkoutLocations[gymIdx] ?? GYM_DEFAULT_TARGET;
-              const nextGymRoute = resolveGymRoute(nx, ny, workoutTarget);
-              return {
-                ...agent,
-                x: nx,
-                y: ny,
-                targetX: nextGymRoute.targetX,
-                targetY: nextGymRoute.targetY,
-                path: astar(
-                  nx,
-                  ny,
-                  nextGymRoute.targetX,
-                  nextGymRoute.targetY,
-                  grid,
-                ),
-                facing: nextGymRoute.facing,
-                state: "walking" as const,
-                gymStage: nextGymRoute.stage,
-                frame: agent.frame + 1,
-              };
+                ) ?? [];
+              agent.x = nx;
+              agent.y = ny;
+              agent.targetX = nextServerRoomRoute.targetX;
+              agent.targetY = nextServerRoomRoute.targetY;
+              agent.path = path;
+              agent.facing = nextServerRoomRoute.facing;
+              agent.state = path.length === 0 ? "standing" : "walking";
+              agent.serverRoomStage = nextServerRoomRoute.stage;
+              agent.frame += 1;
+              continue;
             }
             if (
               agent.interactionTarget === "qa_lab" &&
@@ -2352,25 +2093,24 @@ function useAgentTick(
                 stationType: "console" as const,
               };
               const nextQaLabRoute = resolveQaLabRoute(nx, ny, qaTarget);
-              return {
-                ...agent,
-                x: nx,
-                y: ny,
-                targetX: nextQaLabRoute.targetX,
-                targetY: nextQaLabRoute.targetY,
-                path: astar(
+              const path =
+                findPathThrottled(
                   nx,
                   ny,
                   nextQaLabRoute.targetX,
                   nextQaLabRoute.targetY,
-                  grid,
-                ),
-                facing: nextQaLabRoute.facing,
-                state: "walking" as const,
-                qaLabStage: nextQaLabRoute.stage,
-                qaLabStationType: qaTarget.stationType,
-                frame: agent.frame + 1,
-              };
+                ) ?? [];
+              agent.x = nx;
+              agent.y = ny;
+              agent.targetX = nextQaLabRoute.targetX;
+              agent.targetY = nextQaLabRoute.targetY;
+              agent.path = path;
+              agent.facing = nextQaLabRoute.facing;
+              agent.state = path.length === 0 ? "standing" : "walking";
+              agent.qaLabStage = nextQaLabRoute.stage;
+              agent.qaLabStationType = qaTarget.stationType;
+              agent.frame += 1;
+              continue;
             }
             ns =
               agent.interactionTarget === "sms_booth"
@@ -2379,23 +2119,24 @@ function useAgentTick(
                   ? "standing"
                   : agent.interactionTarget === "server_room"
                     ? "standing"
-                    : agent.interactionTarget === "gym"
-                      ? "working_out"
-                      : agent.interactionTarget === "qa_lab"
-                        ? "standing"
-                        : "sitting";
+                    : agent.interactionTarget === "qa_lab"
+                      ? "standing"
+                      : "sitting";
             if (agent.interactionTarget === "sms_booth") {
               nf = agent.facing;
             } else if (agent.interactionTarget === "phone_booth") {
               nf = agent.facing;
             } else if (agent.interactionTarget === "server_room") {
               nf = SERVER_ROOM_TARGET.facing;
-            } else if (agent.interactionTarget === "gym") {
-              nf = agent.facing;
             } else if (agent.interactionTarget === "qa_lab") {
               nf = agent.facing;
             } else if (agent.interactionTarget === "meeting_room") {
               nf = agent.facing;
+            } else if (agent.interactionTarget === "desk" || ns === "sitting") {
+              const deskIdx = deskByAgentRef.current.get(agent.id);
+              const deskPos =
+                typeof deskIdx === "number" ? deskLocations[deskIdx] : undefined;
+              nf = deskPos?.facing ?? Math.PI;
             }
           } else if (agent.status === "error") {
             ns = "standing";
@@ -2423,16 +2164,14 @@ function useAgentTick(
                     Math.round((f.y + 20) / SNAP_GRID) * SNAP_GRID,
                   ),
                 );
-                return {
-                  ...agent,
-                  x: nx,
-                  y: ny,
-                  targetX: tx,
-                  targetY: ty,
-                  path: astar(nx, ny, tx, ty, grid),
-                  state: "walking" as const,
-                  frame: agent.frame + 1,
-                };
+                agent.x = nx;
+                agent.y = ny;
+                agent.targetX = tx;
+                agent.targetY = ty;
+                agent.path = findPathThrottled(nx, ny, tx, ty) ?? [];
+                agent.state = "walking";
+                agent.frame += 1;
+                continue;
               }
             }
             ns = isAway ? ("away" as const) : "standing";
@@ -2495,36 +2234,30 @@ function useAgentTick(
                 }
               }
               if (!target || !isNavPointFree(grid, target.x, target.y)) {
-                return {
-                  ...agent,
-                  x: nx,
-                  y: ny,
-                  path: [],
-                  state: ns,
-                  frame: agent.frame + 1,
-                };
+                agent.x = nx;
+                agent.y = ny;
+                agent.path = [];
+                agent.state = ns;
+                agent.frame += 1;
+                continue;
               }
-              const plannedRoam = astar(nx, ny, target.x, target.y, grid);
-              if (plannedRoam.length === 0) {
-                return {
-                  ...agent,
-                  x: nx,
-                  y: ny,
-                  path: [],
-                  state: ns,
-                  frame: agent.frame + 1,
-                };
+              const plannedRoam = findPathThrottled(nx, ny, target.x, target.y);
+              if (!plannedRoam || plannedRoam.length === 0) {
+                agent.x = nx;
+                agent.y = ny;
+                agent.path = [];
+                agent.state = ns;
+                agent.frame += 1;
+                continue;
               }
-              return {
-                ...agent,
-                x: nx,
-                y: ny,
-                targetX: target.x,
-                targetY: target.y,
-                path: plannedRoam,
-                state: "walking" as const,
-                frame: agent.frame + 1,
-              };
+              agent.x = nx;
+              agent.y = ny;
+              agent.targetX = target.x;
+              agent.targetY = target.y;
+              agent.path = plannedRoam;
+              agent.state = "walking";
+              agent.frame += 1;
+              continue;
             }
           }
         }
@@ -2535,29 +2268,29 @@ function useAgentTick(
         npath = [];
       }
 
-      return {
-        ...agent,
-        x: nx,
-        y: ny,
-        facing: nf,
-        state: ns,
-        path: npath,
-        ...(conversationTalkPulse
-          ? { bumpTalkUntil: now + CONVERSATION_TALK_PULSE_MS }
-          : {}),
-        frame: agent.frame + 1,
-      };
-    });
+      agent.x = nx;
+      agent.y = ny;
+      agent.facing = nf;
+      agent.state = ns;
+      agent.path = npath;
+      agent.danceStyle = danceStyleByAgentId[agent.id] ?? "cheer";
+      if (conversationTalkPulse) {
+        agent.bumpTalkUntil = now + CONVERSATION_TALK_PULSE_MS;
+      }
+      agent.frame += 1;
+    }
 
-    // Collision bump — when agents overlap, stop them briefly and reroute them
-    // in different directions without the old hard shove.
-    const movedWithCollisions = applyAgentCollisionBumps({ agents: moved, now });
+    // Collision bump throttled to every 3 frames (~20Hz) to eliminate heavy checks every 16ms frame
+    const movedWithCollisions = isCollisionCheckFrame
+      ? applyAgentCollisionBumps({ agents, now })
+      : agents;
 
     renderAgentsRef.current = movedWithCollisions;
     const renderAgentLookup = renderAgentLookupRef.current;
     renderAgentLookup.clear();
-    for (const agent of movedWithCollisions) {
-      renderAgentLookup.set(agent.id, agent);
+    for (let i = 0; i < movedWithCollisions.length; i += 1) {
+      const ag = movedWithCollisions[i];
+      renderAgentLookup.set(ag.id, ag);
     }
   };
 
@@ -2567,6 +2300,7 @@ function useAgentTick(
     tick,
     deskByAgentRef,
     planPath,
+    stickyUntilRef,
   };
 }
 
@@ -2603,7 +2337,7 @@ const buildInitialFurnitureLayout = (
     ensureOfficeKanbanBoard(
       ensureOfficeJukebox(
         ensureOfficeQaLab(
-          ensureOfficeGymRoom(
+          purgeOfficeGymRoom(
             ensureOfficeServerRoom(
               ensureOfficePhoneBooth(
                 ensureOfficeSmsBooth(
@@ -2621,8 +2355,20 @@ const buildInitialFurnitureLayout = (
     ),
   );
 
+const CANVAS_SHADOWS_CONFIG = { type: THREE.PCFShadowMap } as const;
+const CANVAS_STYLE: React.CSSProperties = { width: "100%", height: "100%" };
+
+export function selectVisibleOfficeAgents<T extends { teamId?: string | null }>(
+  agents: T[],
+  teams?: Team[] | null,
+): T[] {
+  if (!teams || teams.length === 0) return agents;
+  return agents.filter((agent) => !isAgentInDisabledTeam(teams, agent.teamId));
+}
+
 export function RetroOffice3D({
-  agents,
+  agents: rawAgents,
+  teams: propsTeams,
   officeCenterSignal = 0,
   animationState = null,
   readOnly = false,
@@ -2689,6 +2435,7 @@ export function RetroOffice3D({
   runCountByAgentId = EMPTY_NUMBER_RECORD,
   lastSeenByAgentId = EMPTY_NUMBER_RECORD,
   streamingTextByAgentId = {},
+  activeChatAgentId = null,
   onStandupArrivalsChange,
   onStandupStartRequested,
   onMonitorSelect,
@@ -2728,6 +2475,7 @@ export function RetroOffice3D({
   onTaskBoardRefreshCronJobs,
 }: {
   agents: OfficeAgent[];
+  teams?: Team[];
   officeCenterSignal?: number;
   animationState?: Pick<
     OfficeAnimationState,
@@ -2735,11 +2483,11 @@ export function RetroOffice3D({
     | "danceUntilByAgentId"
     | "deskHoldByAgentId"
     | "githubHoldByAgentId"
-    | "gymHoldByAgentId"
     | "phoneBoothHoldByAgentId"
     | "smsBoothHoldByAgentId"
     | "qaHoldByAgentId"
     | "jukeboxHoldByAgentId"
+    | "awaitingApprovalByAgentId"
   > | null;
   readOnly?: boolean;
   storageNamespace?: string;
@@ -2807,6 +2555,7 @@ export function RetroOffice3D({
   runCountByAgentId?: Record<string, number>;
   lastSeenByAgentId?: Record<string, number>;
   streamingTextByAgentId?: Record<string, string | null>;
+  activeChatAgentId?: string | null;
   onStandupArrivalsChange?: (arrivedAgentIds: string[]) => void;
   onStandupStartRequested?: () => void;
   onMonitorSelect?: (agentId: string | null) => void;
@@ -2852,9 +2601,65 @@ export function RetroOffice3D({
   onTaskBoardDeleteCard?: (cardId: string) => void;
   onTaskBoardRefreshCronJobs?: () => void;
 }) {
+  const teamStore = useOptionalTeamStore();
+  const teams = propsTeams ?? teamStore?.state.teams ?? [];
+  const agents = useMemo(() => {
+    return selectVisibleOfficeAgents(rawAgents, teams);
+  }, [rawAgents, teams]);
+  const visibleTaskBoardAgents = useMemo(() => {
+    return selectVisibleOfficeAgents(taskBoardAgents, teams);
+  }, [taskBoardAgents, teams]);
+
   const resolvedCleaningCues = animationState?.cleaningCues ?? cleaningCues;
-  const resolvedDanceUntilByAgentId =
-    animationState?.danceUntilByAgentId ?? EMPTY_NUMBER_RECORD;
+  const [localDanceUntilByAgentId, setLocalDanceUntilByAgentId] = useState<
+    Record<string, number>
+  >({});
+  const [danceStyleByAgentId, setDanceStyleByAgentId] = useState<
+    Record<string, AgentDanceStyle>
+  >({});
+
+  useEffect(() => {
+    const handleTriggerDance = (event: Event) => {
+      const customEvent = event as CustomEvent<{
+        agentId: string;
+        danceStyle?: AgentDanceStyle;
+        durationMs?: number;
+      }>;
+      const { agentId, danceStyle, durationMs = 15_000 } = customEvent.detail ?? {};
+      if (!agentId) return;
+
+      const now = Date.now();
+      const until = durationMs > 0 ? now + durationMs : 0;
+
+      setLocalDanceUntilByAgentId((prev) => ({
+        ...prev,
+        [agentId]: until,
+      }));
+      if (danceStyle) {
+        setDanceStyleByAgentId((prev) => ({
+          ...prev,
+          [agentId]: danceStyle,
+        }));
+      }
+    };
+
+    window.addEventListener("hermes3d:trigger-dance", handleTriggerDance);
+    return () => {
+      window.removeEventListener("hermes3d:trigger-dance", handleTriggerDance);
+    };
+  }, []);
+
+  const resolvedDanceUntilByAgentId = useMemo(() => {
+    const upstream = animationState?.danceUntilByAgentId ?? EMPTY_NUMBER_RECORD;
+    const now = Date.now();
+    const result: Record<string, number> = { ...upstream };
+    for (const [id, until] of Object.entries(localDanceUntilByAgentId)) {
+      if (until > now) {
+        result[id] = until;
+      }
+    }
+    return result;
+  }, [animationState?.danceUntilByAgentId, localDanceUntilByAgentId]);
   const kanbanDeskTaskCount = useMemo(
     () =>
       Object.entries(taskBoardCardsByStatus).reduce(
@@ -2866,8 +2671,6 @@ export function RetroOffice3D({
   );
   const resolvedDeskHoldByAgentId =
     animationState?.deskHoldByAgentId ?? deskHoldByAgentId;
-  const resolvedGymHoldByAgentId =
-    animationState?.gymHoldByAgentId ?? gymHoldByAgentId;
   const resolvedSmsBoothHoldByAgentId =
     animationState?.smsBoothHoldByAgentId ?? EMPTY_BOOLEAN_RECORD;
   const resolvedPhoneBoothHoldByAgentId =
@@ -2965,47 +2768,275 @@ export function RetroOffice3D({
   const speechQueueRef = useRef<SpeechTurn[]>([]);
   const speechSeenRepliesRef = useRef<Set<string>>(new Set());
   const speechTurnTimerRef = useRef<number | null>(null);
+  const activeSpeechTurnRef = useRef<SpeechTurn | null>(null);
+  const readSpeechKeysRef = useRef<Set<string>>(
+    typeof window !== "undefined" ? loadReadSpeechKeys() : new Set(),
+  );
+  const [readSpeechKeysVersion, setReadSpeechKeysVersion] = useState(0);
+
+  useEffect(() => {
+    readSpeechKeysRef.current = loadReadSpeechKeys();
+    setReadSpeechKeysVersion((v) => v + 1);
+  }, []);
+
+  const initialSpeechSnapshotDoneRef = useRef(false);
+  useEffect(() => {
+    if (!initialSpeechSnapshotDoneRef.current && feedEvents.length > 0) {
+      initialSpeechSnapshotDoneRef.current = true;
+      readSpeechKeysRef.current = markInitialSnapshotAsRead({
+        events: feedEvents,
+        seenKeys: speechSeenRepliesRef.current,
+        existingReadKeys: readSpeechKeysRef.current,
+      });
+      setReadSpeechKeysVersion((v) => v + 1);
+    }
+  }, [feedEvents]);
+
+  const markSpeechKeyRead = useCallback((key: string, text?: string, agentId?: string) => {
+    if (!key) return;
+    const current = readSpeechKeysRef.current;
+    const textKey = text && agentId ? getSpeechTextKey(agentId, text) : null;
+    const isNew = !current.has(key) || Boolean(textKey && !current.has(textKey));
+
+    let next = persistReadSpeechKey(key, current);
+    if (textKey) {
+      next = persistReadSpeechKey(textKey, next);
+    }
+    readSpeechKeysRef.current = next;
+
+    if (isNew) {
+      setReadSpeechKeysVersion((v) => v + 1);
+    }
+  }, []);
+
   // Hand the floor to the next waiting reply, and keep handing it on until the
   // queue drains. Re-entrant by design: the timer calls straight back in, so
   // the function expression is named to give the recursion its own binding.
-  const pumpSpeechTurns = useCallback(function pump() {
-    if (speechTurnTimerRef.current !== null) return;
-    const next = speechQueueRef.current.shift();
+  const pumpSpeechTurns = useCallback(function pump(forceNext = false) {
+    if (typeof document !== "undefined" && document.hidden) {
+      return;
+    }
+    if (speechTurnTimerRef.current !== null) {
+      if (forceNext) {
+        window.clearTimeout(speechTurnTimerRef.current);
+        speechTurnTimerRef.current = null;
+      } else {
+        return;
+      }
+    }
+    let next = speechQueueRef.current.shift();
+    const now = Date.now();
+    while (next) {
+      const turnTs = getTurnTimestamp(next);
+      const isExpired = now - turnTs > next.durationMs;
+      const textKey = next.text ? getSpeechTextKey(next.agentId, next.text) : "";
+      const isRead =
+        readSpeechKeysRef.current.has(next.key) ||
+        (textKey ? readSpeechKeysRef.current.has(textKey) : false);
+
+      if (isExpired || isRead) {
+        markSpeechKeyRead(next.key, next.text, next.agentId);
+        next = speechQueueRef.current.shift();
+      } else {
+        break;
+      }
+    }
     if (!next) {
+      activeSpeechTurnRef.current = null;
       setSpeechAgentIds((previous) => (previous.size === 0 ? previous : new Set()));
       return;
     }
+    activeSpeechTurnRef.current = next;
+    markSpeechKeyRead(next.key, next.text, next.agentId);
     setSpeechAgentIds(new Set([next.agentId]));
     speechTurnTimerRef.current = window.setTimeout(() => {
       speechTurnTimerRef.current = null;
       pump();
     }, next.durationMs);
-  }, []);
-  useEffect(
-    () => () => {
+  }, [markSpeechKeyRead]);
+
+  const handleDismissSpeech = useCallback(
+    (agentId?: string) => {
+      let shouldPump = false;
+      const currentTurn = activeSpeechTurnRef.current;
+      if (currentTurn) {
+        if (!agentId || currentTurn.agentId === agentId) {
+          markSpeechKeyRead(currentTurn.key, currentTurn.text, currentTurn.agentId);
+          activeSpeechTurnRef.current = null;
+          shouldPump = true;
+        }
+      }
+
+      if (agentId) {
+        speechQueueRef.current = speechQueueRef.current.filter((turn) => {
+          if (turn.agentId === agentId) {
+            markSpeechKeyRead(turn.key, turn.text, turn.agentId);
+            return false;
+          }
+          return true;
+        });
+
+        for (const event of feedEvents) {
+          if (event.id === agentId && event.kind === "reply") {
+            markSpeechKeyRead(`${event.id}:${event.ts}`, event.text, event.id);
+          }
+        }
+
+        if (speechAgentIds.has(agentId)) {
+          shouldPump = true;
+        }
+      } else {
+        shouldPump = true;
+      }
+
+      if (shouldPump) {
+        pumpSpeechTurns(true);
+      }
+    },
+    [feedEvents, markSpeechKeyRead, pumpSpeechTurns, speechAgentIds],
+  );
+
+  const previousChatAgentIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    const prev = previousChatAgentIdRef.current;
+    previousChatAgentIdRef.current = activeChatAgentId;
+
+    if (activeChatAgentId) {
+      handleDismissSpeech(activeChatAgentId);
+      if (prev && prev !== activeChatAgentId) {
+        handleDismissSpeech(prev);
+      }
+    } else if (prev) {
+      // Chat was closed — dismiss any speech bubble for the agent who was just in chat
+      handleDismissSpeech(prev);
+    }
+  }, [activeChatAgentId, handleDismissSpeech]);
+  // Speech turn timer & tab visibility lifecycle:
+  // When switching tabs or minimizing, clear active timers and bubbles immediately
+  // and drain expired queue turns so stale popups do not burst upon refocusing.
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (typeof document === "undefined") return;
+
+      if (document.hidden) {
+        // Immediately clear active speech turn timer
+        if (speechTurnTimerRef.current !== null) {
+          window.clearTimeout(speechTurnTimerRef.current);
+          speechTurnTimerRef.current = null;
+        }
+
+        // Clear or dismiss active speech turn
+        if (activeSpeechTurnRef.current) {
+          markSpeechKeyRead(
+            activeSpeechTurnRef.current.key,
+            activeSpeechTurnRef.current.text,
+            activeSpeechTurnRef.current.agentId,
+          );
+          activeSpeechTurnRef.current = null;
+        }
+        setSpeechAgentIds((prev) => (prev.size === 0 ? prev : new Set()));
+
+        // Drain or clear pending queue if turns are older than their duration to prevent a burst of stuck popups upon tab refocus
+        const { remaining, expired } = drainExpiredSpeechTurns({
+          queue: speechQueueRef.current,
+          now: Date.now(),
+          readKeys: readSpeechKeysRef.current,
+        });
+        speechQueueRef.current = remaining;
+        for (const turn of expired) {
+          markSpeechKeyRead(turn.key, turn.text, turn.agentId);
+        }
+      } else {
+        // Tab became visible again: ensure clean state without replaying stuck turns
+        readSpeechKeysRef.current = loadReadSpeechKeys();
+        setReadSpeechKeysVersion((v) => v + 1);
+        const now = Date.now();
+
+        // Clear any orphan timer
+        if (speechTurnTimerRef.current !== null) {
+          window.clearTimeout(speechTurnTimerRef.current);
+          speechTurnTimerRef.current = null;
+        }
+
+        // Drain turns that expired while hidden or are already read
+        const { remaining, expired } = drainExpiredSpeechTurns({
+          queue: speechQueueRef.current,
+          now,
+          readKeys: readSpeechKeysRef.current,
+        });
+        speechQueueRef.current = remaining;
+        for (const turn of expired) {
+          markSpeechKeyRead(turn.key, turn.text, turn.agentId);
+        }
+
+        // Ensure activeSpeechTurn is dismissed/clean if it was already marked read or expired
+        if (activeSpeechTurnRef.current) {
+          const activeTurn = activeSpeechTurnRef.current;
+          const turnTs = getTurnTimestamp(activeTurn);
+          const isExpired = now - turnTs > activeTurn.durationMs;
+          const textKey = activeTurn.text
+            ? getSpeechTextKey(activeTurn.agentId, activeTurn.text)
+            : "";
+          const isRead =
+            readSpeechKeysRef.current.has(activeTurn.key) ||
+            (textKey ? readSpeechKeysRef.current.has(textKey) : false);
+
+          if (isExpired || isRead) {
+            markSpeechKeyRead(activeTurn.key, activeTurn.text, activeTurn.agentId);
+            activeSpeechTurnRef.current = null;
+          }
+        }
+
+        // If no active turn and queue has valid fresh turns, pump next turn;
+        // otherwise ensure clean state with no lingering speech bubbles.
+        if (!activeSpeechTurnRef.current) {
+          if (speechQueueRef.current.length > 0) {
+            pumpSpeechTurns(true);
+          } else {
+            setSpeechAgentIds((prev) => (prev.size === 0 ? prev : new Set()));
+          }
+        }
+      }
+    };
+
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
       if (speechTurnTimerRef.current !== null) {
         window.clearTimeout(speechTurnTimerRef.current);
         speechTurnTimerRef.current = null;
       }
-    },
-    [],
-  );
+    };
+  }, [markSpeechKeyRead, pumpSpeechTurns]);
   const statusFeedEvents = useMemo(
     () => feedEvents.filter((event) => event.kind !== "reply"),
     [feedEvents],
   );
   const { speechTextByAgentId, speechImageUrlByAgentId } = useMemo(() => {
+    void readSpeechKeysVersion;
     const texts: Record<string, string> = {};
     const images: Record<string, string> = {};
+    const readKeys = readSpeechKeysRef.current;
     for (const event of feedEvents) {
       const text = event.text.trim();
-      if (event.kind !== "reply" || !text || texts[event.id]) continue;
+      const key = `${event.id}:${event.ts}`;
+      const textKey = getSpeechTextKey(event.id, text);
+      if (
+        event.kind !== "reply" ||
+        !text ||
+        texts[event.id] ||
+        readKeys.has(key) ||
+        readKeys.has(textKey)
+      ) {
+        continue;
+      }
       const { cleanText, imageUrl } = extractSpeechImage(text, event.id);
       texts[event.id] = cleanText;
       if (imageUrl) images[event.id] = imageUrl;
     }
     return { speechTextByAgentId: texts, speechImageUrlByAgentId: images };
-  }, [feedEvents]);
+  }, [feedEvents, readSpeechKeysVersion]);
   // Live typing outranks a queued reply, but only one stream may hold the
   // floor. The current holder keeps it until they stop streaming, so the
   // bubble does not hop between agents mid-sentence.
@@ -3030,8 +3061,6 @@ export function RetroOffice3D({
   if (streamingSpeakerId !== heldStreamingSpeakerId) {
     setHeldStreamingSpeakerId(streamingSpeakerId);
   }
-  const activeSpeechAgentId =
-    streamingSpeakerId ?? [...speechAgentIds][0] ?? null;
   const standupSpeechTextByAgentId = useMemo(() => {
     if (!standupMeeting || standupMeeting.phase !== "in_progress") return {};
     const currentCard =
@@ -3218,11 +3247,9 @@ export function RetroOffice3D({
     () =>
       [
         remoteOfficeEnabled ? "remote" : "local",
-        gatewayStatus ?? "unknown",
-        String(agents.length),
         String(officeCenterSignal),
       ].join(":"),
-    [agents.length, gatewayStatus, officeCenterSignal, remoteOfficeEnabled],
+    [officeCenterSignal, remoteOfficeEnabled],
   );
   // New Idea 7: heatmap mode.
   const [heatmapMode, setHeatmapMode] = useState(false);
@@ -3248,6 +3275,38 @@ export function RetroOffice3D({
     setGraphicsQualityState(quality);
     saveGraphicsQuality(quality);
   }, []);
+  const handleAdaptiveDowngradeQuality = useCallback(() => {
+    setGraphicsQualityState((prev) => {
+      const next = getNextLowerGraphicsQuality(prev);
+      if (next && next !== prev) {
+        saveGraphicsQuality(next);
+        return next;
+      }
+      return prev;
+    });
+  }, []);
+  const canvasCamera = useMemo(
+    () => ({
+      position: CAM_POS,
+      fov: SCENE_CAMERA_FOV,
+      near: 0.3,
+      far: 320,
+    }),
+    [CAM_POS],
+  );
+  const canvasGl = useMemo(
+    () => ({
+      antialias: !graphicsQualityConfig.postProcessing,
+      powerPreference: "high-performance" as const,
+      toneMapping: THREE.ACESFilmicToneMapping,
+      toneMappingExposure: 1.0,
+    }),
+    [graphicsQualityConfig.postProcessing],
+  );
+  const canvasDpr = useMemo<[number, number]>(
+    () => [1, graphicsQualityConfig.maxDpr],
+    [graphicsQualityConfig.maxDpr],
+  );
   const handleCanvasCreated = useCallback(
     ({ gl }: { gl: THREE.WebGLRenderer }) => {
       // Allow the browser to restore a lost context instead of killing the
@@ -3349,10 +3408,6 @@ export function RetroOffice3D({
   }, [storageNamespace]);
 
   useEffect(() => {
-    markGymRoomMigrationApplied(storageNamespace);
-  }, [storageNamespace]);
-
-  useEffect(() => {
     markQaLabMigrationApplied(storageNamespace);
   }, [storageNamespace]);
 
@@ -3389,10 +3444,6 @@ export function RetroOffice3D({
   }, [deskAssignmentByDeskUid, deskItems]);
   const janitorCleaningStops = useMemo(
     () => getJanitorCleaningStops(furniture),
-    [furniture],
-  );
-  const gymWorkoutLocations = useMemo(
-    () => getGymWorkoutLocations(furniture),
     [furniture],
   );
   const qaLabStations = useMemo(() => getQaLabStations(furniture), [furniture]);
@@ -3446,6 +3497,11 @@ export function RetroOffice3D({
     });
   }, [janitorCleaningStops, resolvedCleaningCues]);
 
+  const savedAgentPositions = useMemo(
+    () => loadAgentPositions(storageNamespace),
+    [storageNamespace],
+  );
+
   const sceneAgents = useMemo<SceneActor[]>(
     () => [...agents, ...janitorActors],
     [agents, janitorActors],
@@ -3457,18 +3513,19 @@ export function RetroOffice3D({
     tick,
     deskByAgentRef,
     planPath,
+    stickyUntilRef,
   } = useAgentTick(
     sceneAgents,
     deskLocations,
+    savedAgentPositions,
     assignedDeskIndexByAgentId,
-    gymWorkoutLocations,
     qaLabStations,
     meetingSeatLocations,
     furnitureRef,
     lastSeenByAgentId,
     resolvedDeskHoldByAgentId,
     resolvedDanceUntilByAgentId,
-    resolvedGymHoldByAgentId,
+    danceStyleByAgentId,
     resolvedSmsBoothHoldByAgentId,
     resolvedPhoneBoothHoldByAgentId,
     resolvedQaHoldByAgentId,
@@ -3561,6 +3618,7 @@ export function RetroOffice3D({
   }, []);
   const handleAgentClick = useCallback(
     (agentId: string) => {
+      handleDismissSpeech(agentId);
       const agent = renderAgentLookupRef.current.get(agentId);
       if (!agent || !orbitRef.current) return;
       const [wx, , wz] = toWorld(agent.x, agent.y);
@@ -3568,7 +3626,7 @@ export function RetroOffice3D({
       orbitRef.current.update();
       onAgentChatSelect?.(agentId);
     },
-    [onAgentChatSelect, renderAgentLookupRef],
+    [handleDismissSpeech, onAgentChatSelect, renderAgentLookupRef],
   );
   const handleAgentContextMenu = useCallback(
     (agentId: string, x: number, y: number) => {
@@ -3576,6 +3634,13 @@ export function RetroOffice3D({
       setContextMenu({ id: agentId, x, y });
     },
     [],
+  );
+  const handleSpeechBubbleClick = useCallback(
+    (agentId: string) => {
+      handleDismissSpeech(agentId);
+      handleAgentClick(agentId);
+    },
+    [handleDismissSpeech, handleAgentClick],
   );
   const monitorImmersive = Boolean(activeMonitor && monitorImmersiveReady);
   const serverTerminal = useMemo(
@@ -3592,6 +3657,18 @@ export function RetroOffice3D({
   );
   const chairItems = useMemo(
     () => furniture.filter((item) => item.type === "chair"),
+    [furniture],
+  );
+  const plantItems = useMemo(
+    () => furniture.filter((item) => item.type === "plant"),
+    [furniture],
+  );
+  const computerItems = useMemo(
+    () => furniture.filter((item) => item.type === "computer"),
+    [furniture],
+  );
+  const couchItems = useMemo(
+    () => furniture.filter((item) => item.type === "couch"),
     [furniture],
   );
   const activeAtm = useMemo(
@@ -5040,6 +5117,81 @@ export function RetroOffice3D({
     [drag.kind, editMode],
   );
 
+  const handleAgentPointerDown = useCallback(
+    (agentId: string, event: ThreeEvent<PointerEvent>) => {
+      if (event.button !== 0) return;
+      if (drag.kind === "placing") return;
+      const agent = renderAgentLookupRef.current.get(agentId);
+      if (!agent) return;
+      setSelectedUid(null);
+      setContextMenu(null);
+      setDeskActionUid(null);
+      setDrag({
+        kind: "moving_agent",
+        agentId,
+        startX: agent.x,
+        startY: agent.y,
+        hasMoved: false,
+      });
+    },
+    [drag.kind, renderAgentLookupRef],
+  );
+
+  const handleAgentDrop = useCallback(() => {
+    if (drag.kind !== "moving_agent") return;
+    const { agentId, hasMoved } = drag;
+    const agent = renderAgentLookupRef.current.get(agentId);
+    if (agent) {
+      if (!hasMoved) {
+        handleAgentClick(agentId);
+      } else {
+        const deskItems = furniture.filter((i) => i.type === "desk_cubicle");
+        let nearestDesk: FurnitureItem | null = null;
+        let minDistance = 65;
+        for (const desk of deskItems) {
+          const seatX = desk.x + 40;
+          const seatY = desk.y - 5;
+          const dist = Math.hypot(agent.x - seatX, agent.y - seatY);
+          if (dist < minDistance) {
+            minDistance = dist;
+            nearestDesk = desk;
+          }
+        }
+
+        if (nearestDesk && onDeskAssignmentChange) {
+          onDeskAssignmentChange(nearestDesk._uid, agentId);
+          agent.x = nearestDesk.x + 40;
+          agent.y = nearestDesk.y - 5;
+          agent.targetX = agent.x;
+          agent.targetY = agent.y;
+          agent.path = [];
+          agent.facing = Math.PI;
+          agent.state = "sitting";
+          const positions = { [agentId]: { x: agent.x, y: agent.y } };
+          window.setTimeout(() => saveAgentPositions(storageNamespace, positions), 150);
+        } else {
+          agent.targetX = agent.x;
+          agent.targetY = agent.y;
+          agent.path = [];
+          agent.state = "standing";
+          stickyUntilRef.current.set(agentId, Date.now() + 30_000);
+          const positions = { [agentId]: { x: agent.x, y: agent.y } };
+          window.setTimeout(() => saveAgentPositions(storageNamespace, positions), 150);
+        }
+      }
+    }
+    setDrag({ kind: "idle" });
+  }, [drag, furniture, handleAgentClick, onDeskAssignmentChange, renderAgentLookupRef, storageNamespace]);
+
+  useEffect(() => {
+    if (drag.kind !== "moving_agent") return;
+    const handleWindowPointerUp = () => {
+      handleAgentDrop();
+    };
+    window.addEventListener("pointerup", handleWindowPointerUp);
+    return () => window.removeEventListener("pointerup", handleWindowPointerUp);
+  }, [drag.kind, handleAgentDrop]);
+
   const resolveAgentIdForDeskItem = useCallback(
     (uid: string) => {
       const item = furniture.find((entry) => entry._uid === uid);
@@ -5434,8 +5586,27 @@ export function RetroOffice3D({
           ),
         );
       }
+      if (drag.kind === "moving_agent") {
+        const { cx, cy } = worldToCanvas(wx, wz);
+        const agent = renderAgentLookupRef.current.get(drag.agentId);
+        if (agent) {
+          const dx = cx - drag.startX;
+          const dy = cy - drag.startY;
+          if (!drag.hasMoved && Math.hypot(dx, dy) > 6) {
+            setDrag((prev) =>
+              prev.kind === "moving_agent" ? { ...prev, hasMoved: true } : prev,
+            );
+          }
+          agent.x = cx;
+          agent.y = cy;
+          agent.targetX = cx;
+          agent.targetY = cy;
+          agent.path = [];
+          agent.state = "standing";
+        }
+      }
     },
-    [drag, worldToCanvas],
+    [drag, renderAgentLookupRef, worldToCanvas],
   );
 
   const handleFloorClick = useCallback(
@@ -5729,33 +5900,33 @@ export function RetroOffice3D({
   // stacks four full-size bubbles into an unreadable pile.
   useEffect(() => {
     const seen = speechSeenRepliesRef.current;
-    const arrivals: SpeechTurn[] = [];
-    // Oldest first: the queue is a waiting line, and feedEvents is newest-first.
-    for (const event of [...feedEvents].reverse()) {
-      if (event.kind !== "reply") continue;
-      const text = event.text.trim();
-      if (!text) continue;
-      const key = `${event.id}:${event.ts}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      arrivals.push({
-        agentId: event.id,
-        key,
-        durationMs: speechTurnDurationMs(text.length),
-      });
+    const readKeys = readSpeechKeysRef.current;
+
+    const { arrivals, keysToMarkRead } = filterUnreadArrivals({
+      events: feedEvents,
+      seenKeys: seen,
+      readKeys,
+      activeChatAgentId,
+    });
+
+    for (const key of keysToMarkRead) {
+      markSpeechKeyRead(key);
     }
+
     if (seen.size > 64) {
       speechSeenRepliesRef.current = new Set(
         feedEvents.map((event) => `${event.id}:${event.ts}`),
       );
     }
+
     if (arrivals.length === 0) return;
+
     speechQueueRef.current = enqueueSpeechTurns(
       speechQueueRef.current,
       arrivals,
     );
     pumpSpeechTurns();
-  }, [feedEvents, pumpSpeechTurns]);
+  }, [activeChatAgentId, feedEvents, markSpeechKeyRead, pumpSpeechTurns]);
 
   // E3 Idea 1: emoji mood reactions on feed events.
   useEffect(() => {
@@ -5860,35 +6031,35 @@ export function RetroOffice3D({
           <SceneErrorBoundary>
           <Canvas
             key={canvasResetKey}
-            dpr={[0.85, graphicsQualityConfig.maxDpr]}
-            camera={{
-              position: CAM_POS,
-              fov: SCENE_CAMERA_FOV,
-              near: 0.3,
-              far: 320,
-            }}
-            shadows={{ type: THREE.PCFShadowMap }}
-            gl={{
-              antialias: true,
-              powerPreference: "high-performance",
-              toneMapping: THREE.ACESFilmicToneMapping,
-              toneMappingExposure: 1.0,
-            }}
-            style={{ width: "100%", height: "100%" }}
+            dpr={canvasDpr}
+            camera={canvasCamera}
+            shadows={CANVAS_SHADOWS_CONFIG}
+            gl={canvasGl}
+            style={CANVAS_STYLE}
             onCreated={handleCanvasCreated}
             onPointerUp={() => {
               if (drag.kind === "moving") setDrag({ kind: "idle" });
+              if (drag.kind === "moving_agent") {
+                handleAgentDrop();
+              }
             }}
           >
             {/* Ensure camera looks at the active office target after mount. */}
             <CameraRig target={cameraTarget} />
-            <AdaptiveDprController maxDpr={graphicsQualityConfig.maxDpr} />
+            <StableAdaptivePerformanceController
+              maxDpr={graphicsQualityConfig.maxDpr}
+              onDowngradeQuality={handleAdaptiveDowngradeQuality}
+            />
 
-            {/* Orbit / pan / zoom controls — disabled while follow cam is active or while editing furniture. */}
+            {/* Orbit / pan / zoom controls — disabled while follow cam is active, dragging agents, or editing furniture. */}
             <OrbitControls
               ref={orbitRef}
               target={cameraTarget}
-              enabled={followAgentId === null && (!editMode || spaceDown)}
+              enabled={
+                followAgentId === null &&
+                drag.kind !== "moving_agent" &&
+                (!editMode || spaceDown)
+              }
               enableDamping
               dampingFactor={0.08}
               rotateSpeed={0.6}
@@ -5964,6 +6135,24 @@ export function RetroOffice3D({
                 <InstancedFurnitureItemsModel
                   itemType="chair"
                   items={chairItems}
+                />
+              ) : null}
+              {!editMode ? (
+                <InstancedFurnitureItemsModel
+                  itemType="plant"
+                  items={plantItems}
+                />
+              ) : null}
+              {!editMode ? (
+                <InstancedFurnitureItemsModel
+                  itemType="computer"
+                  items={computerItems}
+                />
+              ) : null}
+              {!editMode ? (
+                <InstancedFurnitureItemsModel
+                  itemType="couch"
+                  items={couchItems}
                 />
               ) : null}
               {furniture.map((item) =>
@@ -6230,102 +6419,6 @@ export function RetroOffice3D({
                     onPointerOut={handleFurniturePointerOut}
                     onClick={handleDeskClick}
                   />
-                ) : item.type === "treadmill" ? (
-                  <InteractiveTreadmillModel
-                    key={item._uid}
-                    item={item}
-                    isSelected={item._uid === selectedUid}
-                    isHovered={item._uid === hoverUid}
-                    editMode={editMode}
-                    onPointerDown={handleFurniturePointerDown}
-                    onPointerOver={handleFurniturePointerOver}
-                    onPointerOut={handleFurniturePointerOut}
-                    onClick={handleDeskClick}
-                  />
-                ) : item.type === "weight_bench" ? (
-                  <InteractiveWeightBenchModel
-                    key={item._uid}
-                    item={item}
-                    isSelected={item._uid === selectedUid}
-                    isHovered={item._uid === hoverUid}
-                    editMode={editMode}
-                    onPointerDown={handleFurniturePointerDown}
-                    onPointerOver={handleFurniturePointerOver}
-                    onPointerOut={handleFurniturePointerOut}
-                    onClick={handleDeskClick}
-                  />
-                ) : item.type === "dumbbell_rack" ? (
-                  <InteractiveDumbbellRackModel
-                    key={item._uid}
-                    item={item}
-                    isSelected={item._uid === selectedUid}
-                    isHovered={item._uid === hoverUid}
-                    editMode={editMode}
-                    onPointerDown={handleFurniturePointerDown}
-                    onPointerOver={handleFurniturePointerOver}
-                    onPointerOut={handleFurniturePointerOut}
-                    onClick={handleDeskClick}
-                  />
-                ) : item.type === "exercise_bike" ? (
-                  <InteractiveExerciseBikeModel
-                    key={item._uid}
-                    item={item}
-                    isSelected={item._uid === selectedUid}
-                    isHovered={item._uid === hoverUid}
-                    editMode={editMode}
-                    onPointerDown={handleFurniturePointerDown}
-                    onPointerOver={handleFurniturePointerOver}
-                    onPointerOut={handleFurniturePointerOut}
-                    onClick={handleDeskClick}
-                  />
-                ) : item.type === "rowing_machine" ? (
-                  <InteractiveRowingMachineModel
-                    key={item._uid}
-                    item={item}
-                    isSelected={item._uid === selectedUid}
-                    isHovered={item._uid === hoverUid}
-                    editMode={editMode}
-                    onPointerDown={handleFurniturePointerDown}
-                    onPointerOver={handleFurniturePointerOver}
-                    onPointerOut={handleFurniturePointerOut}
-                    onClick={handleDeskClick}
-                  />
-                ) : item.type === "kettlebell_rack" ? (
-                  <InteractiveKettlebellRackModel
-                    key={item._uid}
-                    item={item}
-                    isSelected={item._uid === selectedUid}
-                    isHovered={item._uid === hoverUid}
-                    editMode={editMode}
-                    onPointerDown={handleFurniturePointerDown}
-                    onPointerOver={handleFurniturePointerOver}
-                    onPointerOut={handleFurniturePointerOut}
-                    onClick={handleDeskClick}
-                  />
-                ) : item.type === "punching_bag" ? (
-                  <InteractivePunchingBagModel
-                    key={item._uid}
-                    item={item}
-                    isSelected={item._uid === selectedUid}
-                    isHovered={item._uid === hoverUid}
-                    editMode={editMode}
-                    onPointerDown={handleFurniturePointerDown}
-                    onPointerOver={handleFurniturePointerOver}
-                    onPointerOut={handleFurniturePointerOut}
-                    onClick={handleDeskClick}
-                  />
-                ) : item.type === "yoga_mat" ? (
-                  <InteractiveYogaMatModel
-                    key={item._uid}
-                    item={item}
-                    isSelected={item._uid === selectedUid}
-                    isHovered={item._uid === hoverUid}
-                    editMode={editMode}
-                    onPointerDown={handleFurniturePointerDown}
-                    onPointerOver={handleFurniturePointerOver}
-                    onPointerOut={handleFurniturePointerOut}
-                    onClick={handleDeskClick}
-                  />
                 ) : item.type === "stove" ? (
                   <KitchenStoveModel
                     key={item._uid}
@@ -6365,7 +6458,10 @@ export function RetroOffice3D({
                     onPointerOut={handleFurniturePointerOut}
                     onClick={handleDeskClick}
                   />
-                ) : (
+                ) : !editMode &&
+                  (item.type === "plant" ||
+                    item.type === "computer" ||
+                    item.type === "couch") ? null : (
                   <GenericFurnitureModel
                     key={item._uid}
                     item={item}
@@ -6387,7 +6483,10 @@ export function RetroOffice3D({
             </Suspense>
 
             {remoteLayoutFurniture.length > 0 ? (
-              <ReadOnlyFurnitureClone furniture={remoteLayoutFurniture} />
+              <ReadOnlyFurnitureClone
+                furniture={remoteLayoutFurniture}
+                agentsRef={renderAgentsRef}
+              />
             ) : null}
 
             {/* Removed standalone Jukebox as it's now in the furniture loop */}
@@ -6412,28 +6511,48 @@ export function RetroOffice3D({
                   agentLookupRef={renderAgentLookupRef}
                   onHover={isJanitor ? undefined : handleAgentHover}
                   onUnhover={isJanitor ? undefined : handleAgentUnhover}
+                  onPointerDown={isJanitor ? undefined : handleAgentPointerDown}
+                  isBeingDragged={
+                    drag.kind === "moving_agent" && drag.agentId === agent.id
+                  }
                   onClick={isJanitor ? undefined : handleAgentClick}
                   onContextMenu={isJanitor ? undefined : handleAgentContextMenu}
+                  onDismissSpeech={isJanitor ? undefined : handleDismissSpeech}
+                  onSpeechBubbleClick={
+                    isJanitor ? undefined : handleSpeechBubbleClick
+                  }
                   showSpeech={
                     isJanitor
                       ? false
                       : standupMeeting?.phase === "in_progress"
                         ? Boolean(standupSpeechTextByAgentId[agent.id])
-                        : agent.id === activeSpeechAgentId
+                        : streamingSpeakerId !== null
+                          ? streamingSpeakerId === agent.id && Boolean(streamingTextByAgentId[agent.id]?.trim())
+                          : activeSpeechTurnRef.current?.agentId === agent.id || Boolean(animationState?.awaitingApprovalByAgentId?.[agent.id])
                   }
                   speechText={
                     isJanitor
                       ? null
                       : standupMeeting?.phase === "in_progress"
                         ? (standupSpeechTextByAgentId[agent.id] ?? null)
-                        : (speechTextByAgentId[agent.id] ??
-                            streamingTextByAgentId[agent.id] ??
-                            null)
+                        : (streamingSpeakerId === agent.id
+                            ? (streamingTextByAgentId[agent.id] ?? null)
+                            : (animationState?.awaitingApprovalByAgentId?.[agent.id]
+                                ? "Approval required"
+                                : (activeSpeechTurnRef.current?.agentId === agent.id
+                                    ? (activeSpeechTurnRef.current.text ??
+                                        (speechAgentIds.has(agent.id)
+                                          ? (speechTextByAgentId[agent.id] ?? null)
+                                          : null))
+                                    : (speechAgentIds.has(agent.id)
+                                        ? (speechTextByAgentId[agent.id] ?? null)
+                                        : null))))
                   }
                   suppressSpeechBubble={
                     suppressSceneSpeechBubbles &&
                     standupMeeting?.currentSpeakerAgentId !== agent.id
                   }
+                  standupMeeting={standupMeeting}
                   huddleSeatIndex={
                     renderAgentUiById[agent.id]?.conversationGroupId
                       ? (renderAgentUiById[agent.id]?.conversationSeatIndex ?? 0)
@@ -6527,9 +6646,9 @@ export function RetroOffice3D({
               />
             ) : null}
 
-            {/* Floor raycaster for edit-mode interaction. */}
+            {/* Floor raycaster for interaction. */}
             <SceneFloorRaycaster
-              enabled={editMode}
+              enabled={editMode || drag.kind === "moving_agent"}
               onMove={handleFloorMove}
               onClick={handleFloorClick}
             />
@@ -6973,6 +7092,86 @@ export function RetroOffice3D({
               >
                 Copy ID
               </button>
+              <button
+                className="w-full flex items-center gap-2 px-3 py-2 text-xs text-amber-200/90 hover:bg-amber-900/25 transition-colors text-left"
+                onClick={() => {
+                  const id = contextMenu.id;
+                  setContextMenu(null);
+                  onAgentEdit?.(id);
+                }}
+              >
+                Customize Avatar
+              </button>
+              <div className="border-t border-amber-900/20 px-3 py-1">
+                <span className="text-[9px] font-bold text-amber-500/60 uppercase tracking-wider">
+                  Dance
+                </span>
+              </div>
+              <button
+                className="w-full px-3 py-1 text-xs text-amber-200/80 hover:bg-amber-900/20 transition-colors text-left"
+                onClick={() => {
+                  const id = contextMenu.id;
+                  setLocalDanceUntilByAgentId((prev) => ({ ...prev, [id]: Date.now() + 15_000 }));
+                  setDanceStyleByAgentId((prev) => ({ ...prev, [id]: "cheer" }));
+                  setContextMenu(null);
+                }}
+              >
+                Cheer
+              </button>
+              <button
+                className="w-full px-3 py-1 text-xs text-amber-200/80 hover:bg-amber-900/20 transition-colors text-left"
+                onClick={() => {
+                  const id = contextMenu.id;
+                  setLocalDanceUntilByAgentId((prev) => ({ ...prev, [id]: Date.now() + 15_000 }));
+                  setDanceStyleByAgentId((prev) => ({ ...prev, [id]: "disco" }));
+                  setContextMenu(null);
+                }}
+              >
+                Disco
+              </button>
+              <button
+                className="w-full px-3 py-1 text-xs text-amber-200/80 hover:bg-amber-900/20 transition-colors text-left"
+                onClick={() => {
+                  const id = contextMenu.id;
+                  setLocalDanceUntilByAgentId((prev) => ({ ...prev, [id]: Date.now() + 15_000 }));
+                  setDanceStyleByAgentId((prev) => ({ ...prev, [id]: "wave" }));
+                  setContextMenu(null);
+                }}
+              >
+                Robot Wave
+              </button>
+              <button
+                className="w-full px-3 py-1 text-xs text-amber-200/80 hover:bg-amber-900/20 transition-colors text-left"
+                onClick={() => {
+                  const id = contextMenu.id;
+                  setLocalDanceUntilByAgentId((prev) => ({ ...prev, [id]: Date.now() + 15_000 }));
+                  setDanceStyleByAgentId((prev) => ({ ...prev, [id]: "spin" }));
+                  setContextMenu(null);
+                }}
+              >
+                360 Spin
+              </button>
+              <button
+                className="w-full px-3 py-1 text-xs text-amber-200/80 hover:bg-amber-900/20 transition-colors text-left"
+                onClick={() => {
+                  const id = contextMenu.id;
+                  setLocalDanceUntilByAgentId((prev) => ({ ...prev, [id]: Date.now() + 15_000 }));
+                  setDanceStyleByAgentId((prev) => ({ ...prev, [id]: "rock" }));
+                  setContextMenu(null);
+                }}
+              >
+                Rock Headbang
+              </button>
+              <button
+                className="w-full px-3 py-1 text-xs text-red-300/80 hover:bg-red-950/30 transition-colors text-left"
+                onClick={() => {
+                  const id = contextMenu.id;
+                  setLocalDanceUntilByAgentId((prev) => ({ ...prev, [id]: 0 }));
+                  setContextMenu(null);
+                }}
+              >
+                Stop Dance
+              </button>
             </div>
           );
         })()}
@@ -7141,7 +7340,7 @@ export function RetroOffice3D({
 
       {kanbanImmersive ? (
         <KanbanImmersiveScreen
-          agents={taskBoardAgents}
+          agents={visibleTaskBoardAgents}
           cardsByStatus={taskBoardCardsByStatus}
           selectedCard={taskBoardSelectedCard}
           activeRuns={taskBoardActiveRuns}

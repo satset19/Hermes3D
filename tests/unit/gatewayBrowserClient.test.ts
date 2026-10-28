@@ -133,4 +133,52 @@ describe("GatewayBrowserClient", () => {
     expect(new TextEncoder().encode(lastClose?.reason ?? "").byteLength).toBeLessThanOrEqual(123);
     warnSpy.mockRestore();
   });
+
+  it("sends ping on 25s keepalive and closes with ping_timeout after 5s without response", async () => {
+    const client = new GatewayBrowserClient({ url: "ws://example.com" });
+    client.start();
+
+    const ws = MockWebSocket.instances[0];
+    if (!ws) throw new Error("WebSocket not created");
+    ws.onopen?.();
+
+    // Challenge arrives and triggers connect
+    ws.onmessage?.({
+      data: JSON.stringify({
+        type: "event",
+        event: "connect.challenge",
+        payload: { nonce: "abc" },
+      }),
+    } as MessageEvent);
+
+    await vi.runAllTicks();
+    const connectFrame = JSON.parse(MockWebSocket.sent[0] ?? "{}");
+
+    // Server returns hello-ok
+    ws.onmessage?.({
+      data: JSON.stringify({
+        type: "res",
+        id: connectFrame.id,
+        ok: true,
+        payload: { type: "hello-ok", protocol: 4 },
+      }),
+    } as MessageEvent);
+
+    await vi.runAllTicks();
+    expect(MockWebSocket.sent).toHaveLength(1);
+
+    // Advance 25s for keepalive ping
+    await vi.advanceTimersByTimeAsync(25_000);
+    expect(MockWebSocket.sent).toHaveLength(2);
+    const pingFrame = JSON.parse(MockWebSocket.sent[1] ?? "{}");
+    expect(pingFrame.method).toBe("ping");
+
+    // Advance 5s timeout without reply -> should close with 4000 ping_timeout
+    await vi.advanceTimersByTimeAsync(5_000);
+    const lastClose = MockWebSocket.closes.at(-1);
+    expect(lastClose?.code).toBe(4000);
+    expect(lastClose?.reason).toBe("ping_timeout");
+
+    client.stop();
+  });
 });

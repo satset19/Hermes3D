@@ -16,6 +16,7 @@ import type { GatewayStatus } from "@/lib/gateway/GatewayClient";
 type ChatInteractionDispatchAction =
   | { type: "updateAgent"; agentId: string; patch: Partial<AgentState> }
   | { type: "appendOutput"; agentId: string; line: string }
+  | { type: "clearChat"; agentId: string }
   | { type: "enqueueQueuedMessage"; agentId: string; message: string }
   | { type: "removeQueuedMessage"; agentId: string; index: number }
   | { type: "shiftQueuedMessage"; agentId: string; expectedMessage?: string };
@@ -64,6 +65,7 @@ export type ChatInteractionController = {
   handleSend: (agentId: string, sessionKey: string, message: string, attachments?: RuntimeAttachment[]) => Promise<void>;
   removeQueuedMessage: (agentId: string, index: number) => void;
   handleNewSession: (agentId: string) => Promise<void>;
+  handleClearChat: (agentId: string) => Promise<void>;
   handleStopRun: (agentId: string, sessionKey: string) => Promise<void>;
   queueLivePatch: (agentId: string, patch: Partial<AgentState>) => void;
   clearPendingLivePatch: (agentId: string) => void;
@@ -395,6 +397,34 @@ export function useChatInteractionController(
     [params]
   );
 
+  const handleClearChat = useCallback(
+    async (agentId: string) => {
+      const agent = params.getAgents().find((entry) => entry.agentId === agentId);
+      if (!agent) return;
+      const sessionKey = (agent.sessionKey || "").trim() || `agent:${agentId}:main`;
+      try {
+        await params.client.call("chat.clear", { sessionKey, key: sessionKey });
+        params.clearRunTracking(agent.runId);
+        params.clearHistoryInFlight(sessionKey);
+        params.clearSpecialUpdateMarker(agentId);
+        params.clearSpecialLatestUpdateInFlight(agentId);
+        params.dispatch({
+          type: "clearChat",
+          agentId,
+        });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Failed to clear chat.";
+        params.setError(message);
+        params.dispatch({
+          type: "appendOutput",
+          agentId,
+          line: `Clear chat failed: ${message}`,
+        });
+      }
+    },
+    [params]
+  );
+
   return {
     stopBusyAgentId,
     flushPendingDraft,
@@ -402,6 +432,7 @@ export function useChatInteractionController(
     handleSend,
     removeQueuedMessage,
     handleNewSession,
+    handleClearChat,
     handleStopRun,
     queueLivePatch,
     clearPendingLivePatch,

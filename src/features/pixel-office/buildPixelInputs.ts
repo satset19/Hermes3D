@@ -19,8 +19,7 @@ export const buildPixelAgentInputs = (params: {
         ? "phone_booth"
         : animationState.smsBoothHoldByAgentId[id]
           ? "sms_booth"
-          : animationState.gymHoldByAgentId[id] ||
-              animationState.skillGymHoldByAgentId[id] ||
+          : animationState.skillGymHoldByAgentId[id] ||
               (animationState.manualGymUntilByAgentId[id] ?? 0) > nowMs
             ? "gym"
             : animationState.qaHoldByAgentId[id]

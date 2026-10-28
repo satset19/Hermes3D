@@ -1,6 +1,9 @@
 import {
   BEDROOM_DOOR_Y,
+  BEDROOM_ROOM_BOTTOM_WALL_Y,
   BEDROOM_ROOM_END_X,
+  BEDROOM_ROOM_HEIGHT,
+  BEDROOM_ROOM_TOP_Y,
   BEDROOM_ROOM_WIDTH,
   BEDROOM_ROOM_X,
   DOOR_LENGTH,
@@ -8,8 +11,6 @@ import {
   EAST_WING_DOOR_Y,
   EAST_WING_ROOM_HEIGHT,
   EAST_WING_ROOM_TOP_Y,
-  GYM_ROOM_END_X,
-  GYM_ROOM_X,
   QA_LAB_END_X,
   QA_LAB_X,
   WALL_THICKNESS,
@@ -18,7 +19,6 @@ import { nextUid } from "@/features/retro-office/core/geometry";
 import {
   hasAtmMigrationApplied,
   hasBedroomMigrationApplied,
-  hasGymRoomMigrationApplied,
   hasPhoneBoothMigrationApplied,
   hasQaLabMigrationApplied,
   hasSmsBoothMigrationApplied,
@@ -193,6 +193,9 @@ const EAST_WING_DOOR_BOTTOM_Y = EAST_WING_DOOR_Y + DOOR_LENGTH;
 const EAST_WING_TOP_WALL_HEIGHT = EAST_WING_DOOR_Y - EAST_WING_ROOM_TOP_Y;
 const EAST_WING_BOTTOM_WALL_HEIGHT =
   EAST_WING_ROOM_BOTTOM_Y - EAST_WING_DOOR_BOTTOM_Y;
+
+const GYM_ROOM_X = 1140;
+const GYM_ROOM_END_X = 1316;
 
 const PREVIOUS_GYM_ROOM_ITEMS: FurnitureSeed[] = [
   {
@@ -417,30 +420,30 @@ export const DEFAULT_BEDROOM_ITEMS: FurnitureSeed[] = [
   {
     type: "wall",
     x: BEDROOM_ROOM_X,
-    y: EAST_WING_ROOM_TOP_Y,
+    y: BEDROOM_ROOM_TOP_Y,
     w: BEDROOM_ROOM_WIDTH + WALL_THICKNESS,
     h: WALL_THICKNESS,
   },
   {
     type: "wall",
     x: BEDROOM_ROOM_X,
-    y: EAST_WING_ROOM_BOTTOM_WALL_Y,
+    y: BEDROOM_ROOM_BOTTOM_WALL_Y,
     w: BEDROOM_ROOM_WIDTH + WALL_THICKNESS,
     h: WALL_THICKNESS,
   },
   {
     type: "wall",
     x: BEDROOM_ROOM_END_X,
-    y: EAST_WING_ROOM_TOP_Y,
+    y: BEDROOM_ROOM_TOP_Y,
     w: WALL_THICKNESS,
-    h: EAST_WING_ROOM_HEIGHT,
+    h: BEDROOM_ROOM_HEIGHT,
   },
   {
     type: "wall",
     x: BEDROOM_ROOM_X,
-    y: EAST_WING_ROOM_TOP_Y,
+    y: BEDROOM_ROOM_TOP_Y,
     w: WALL_THICKNESS,
-    h: BEDROOM_DOOR_Y - EAST_WING_ROOM_TOP_Y,
+    h: BEDROOM_DOOR_Y - BEDROOM_ROOM_TOP_Y,
   },
   {
     type: "door",
@@ -455,18 +458,18 @@ export const DEFAULT_BEDROOM_ITEMS: FurnitureSeed[] = [
     x: BEDROOM_ROOM_X,
     y: BEDROOM_DOOR_Y + DOOR_LENGTH,
     w: WALL_THICKNESS,
-    h: EAST_WING_ROOM_HEIGHT - (BEDROOM_DOOR_Y + DOOR_LENGTH - EAST_WING_ROOM_TOP_Y),
+    h: BEDROOM_ROOM_HEIGHT - (BEDROOM_DOOR_Y + DOOR_LENGTH - BEDROOM_ROOM_TOP_Y),
   },
-  // 9 beds arranged neatly in 3 rows x 3 columns
-  { type: "bed", x: 1565, y: 100, color: "#1e40af" },
-  { type: "bed", x: 1640, y: 100, color: "#0f766e" },
-  { type: "bed", x: 1715, y: 100, color: "#881337" },
-  { type: "bed", x: 1565, y: 260, color: "#0f766e" },
-  { type: "bed", x: 1640, y: 260, color: "#881337" },
-  { type: "bed", x: 1715, y: 260, color: "#1e40af" },
-  { type: "bed", x: 1565, y: 420, color: "#881337" },
-  { type: "bed", x: 1640, y: 420, color: "#1e40af" },
-  { type: "bed", x: 1715, y: 420, color: "#0f766e" },
+  // 9 beds arranged neatly in 3 rows x 3 columns inside the outdoor annex
+  { type: "bed", x: 1380, y: 780, color: "#1e40af" },
+  { type: "bed", x: 1500, y: 780, color: "#0f766e" },
+  { type: "bed", x: 1620, y: 780, color: "#881337" },
+  { type: "bed", x: 1380, y: 830, color: "#0f766e" },
+  { type: "bed", x: 1500, y: 830, color: "#881337" },
+  { type: "bed", x: 1620, y: 830, color: "#1e40af" },
+  { type: "bed", x: 1380, y: 880, color: "#881337" },
+  { type: "bed", x: 1500, y: 880, color: "#1e40af" },
+  { type: "bed", x: 1620, y: 880, color: "#0f766e" },
 ];
 
 const DEFAULT_ART_ROOM_ITEMS: FurnitureSeed[] = [
@@ -569,12 +572,13 @@ const DEFAULT_FURNITURE: FurnitureSeed[] = [
   { type: "mouse", x: 752, y: 295 },
   { type: "trash", x: 770, y: 290 },
   { type: "desk_cubicle", x: 100, y: 500, id: "desk_4" },
+  { type: "chair", x: 120, y: 490, facing: 180 },
   { type: "computer", x: 120, y: 487 },
   { type: "keyboard", x: 130, y: 490 },
   { type: "mouse", x: 152, y: 495 },
   { type: "trash", x: 170, y: 490 },
   { type: "desk_cubicle", x: 300, y: 500, id: "desk_5" },
-  { type: "chair", x: 310, y: 490, facing: 180 },
+  { type: "chair", x: 320, y: 490, facing: 180 },
   { type: "computer", x: 320, y: 487 },
   { type: "keyboard", x: 330, y: 495 },
   { type: "mouse", x: 352, y: 495 },
@@ -791,49 +795,25 @@ export const ensureOfficeServerRoom = (
   ];
 };
 
-export const ensureOfficeGymRoom = (
-  items: FurnitureItem[],
-): FurnitureItem[] => {
-  const hasCurrentGymRoom = hasSignature(items, GYM_ROOM_SIGNATURES);
-  if (hasCurrentGymRoom) return items;
+const GYM_FURNITURE_TYPES = new Set([
+  "treadmill",
+  "weight_bench",
+  "dumbbell_rack",
+  "exercise_bike",
+  "punching_bag",
+  "rowing_machine",
+  "kettlebell_rack",
+  "yoga_mat",
+]);
 
-  const hasPreviousGymRoom = hasAllSignatures(
-    items,
-    PREVIOUS_GYM_ROOM_SIGNATURES,
+export const purgeOfficeGymRoom = (items: FurnitureItem[]): FurnitureItem[] => {
+  return items.filter(
+    (item) =>
+      !GYM_FURNITURE_TYPES.has(item.type) &&
+      !GYM_ROOM_SIGNATURES.has(createFurnitureSignature(item)) &&
+      !PREVIOUS_GYM_ROOM_SIGNATURES.has(createFurnitureSignature(item)) &&
+      !LEGACY_GYM_ROOM_SIGNATURES.has(createFurnitureSignature(item)),
   );
-  if (hasPreviousGymRoom) {
-    return [
-      ...replaceBySignatureSet(items, PREVIOUS_GYM_ROOM_SIGNATURES),
-      ...DEFAULT_GYM_ITEMS.map((item) => ({ ...item, _uid: nextUid() })),
-    ];
-  }
-
-  const hasLegacyGymRoom = hasAllSignatures(items, LEGACY_GYM_ROOM_SIGNATURES);
-  if (hasLegacyGymRoom) {
-    return [
-      ...replaceBySignatureSet(items, LEGACY_GYM_ROOM_SIGNATURES),
-      ...DEFAULT_GYM_ITEMS.map((item) => ({ ...item, _uid: nextUid() })),
-    ];
-  }
-
-  const hasGymEquipment = items.some((item) =>
-    [
-      "treadmill",
-      "weight_bench",
-      "dumbbell_rack",
-      "exercise_bike",
-      "punching_bag",
-      "rowing_machine",
-      "kettlebell_rack",
-      "yoga_mat",
-    ].includes(item.type),
-  );
-  if (hasGymEquipment) return items;
-  if (hasGymRoomMigrationApplied()) return items;
-  return [
-    ...items,
-    ...DEFAULT_GYM_ITEMS.map((item) => ({ ...item, _uid: nextUid() })),
-  ];
 };
 
 export const ensureOfficeQaLab = (items: FurnitureItem[]): FurnitureItem[] => {

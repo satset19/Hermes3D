@@ -13,20 +13,28 @@ import {
   type SummaryStatusSnapshot,
 } from "@/features/agents/state/runtimeEventBridge";
 import type { AgentStoreSeed } from "@/features/agents/state/store";
-import { deriveHydrateAgentFleetResult } from "@/features/agents/operations/agentFleetHydrationDerivation";
+import {
+  deriveHydrateAgentFleetResult,
+  normalizeTeams,
+} from "@/features/agents/operations/agentFleetHydrationDerivation";
 
 type GatewayClientLike = {
   call: (method: string, params: unknown) => Promise<unknown>;
   getLastHello?: () => { snapshot?: unknown } | null;
 };
 
+import type { Team } from "@/features/teams/types";
+
 type AgentsListResult = {
   defaultId: string;
   mainKey: string;
   scope?: string;
+  teams?: Team[];
   agents: Array<{
     id: string;
     name?: string;
+    role?: string;
+    teamId?: string | null;
     identity?: {
       name?: string;
       theme?: string;
@@ -87,10 +95,20 @@ const resolveAgentsListFromHelloSnapshot = (snapshot: unknown): AgentsListResult
     const id = typeof entry.agentId === "string" ? entry.agentId.trim() : "";
     if (!id) return [];
     const name = typeof entry.name === "string" ? entry.name.trim() : "";
+    const role =
+      typeof entry.role === "string" && entry.role.trim() ? entry.role.trim() : undefined;
+    const teamId =
+      typeof entry.teamId === "string" && entry.teamId.trim()
+        ? entry.teamId.trim()
+        : entry.teamId === null
+        ? null
+        : undefined;
     return [
       {
         id,
         ...(name ? { name } : {}),
+        ...(role !== undefined ? { role } : {}),
+        ...(teamId !== undefined ? { teamId } : {}),
       },
     ];
   });
@@ -106,16 +124,24 @@ const resolveAgentsListFromHelloSnapshot = (snapshot: unknown): AgentsListResult
     typeof sessionDefaults?.mainKey === "string" ? sessionDefaults.mainKey.trim() || "main" : "main";
   const scope =
     typeof sessionDefaults?.scope === "string" ? sessionDefaults.scope.trim() || undefined : undefined;
+  const rawTeams = Array.isArray(snapshot.teams)
+    ? snapshot.teams
+    : Array.isArray(health?.teams)
+    ? health.teams
+    : undefined;
+  const teams = normalizeTeams(rawTeams);
   return {
     defaultId,
     mainKey,
     ...(scope ? { scope } : {}),
+    ...(teams !== undefined ? { teams } : {}),
     agents,
   };
 };
 
 export type HydrateAgentFleetResult = {
   seeds: AgentStoreSeed[];
+  teams?: Team[];
   sessionCreatedAgentIds: string[];
   sessionSettingsSyncedAgentIds: string[];
   summaryPatches: SummarySnapshotPatch[];
@@ -187,6 +213,33 @@ export async function hydrateAgentFleetFromGateway(params: {
       agentsResult = helloSnapshotFallback;
     }
   }
+  if (helloSnapshotFallback) {
+    if (!agentsResult.teams && helloSnapshotFallback.teams) {
+      agentsResult = {
+        ...agentsResult,
+        teams: helloSnapshotFallback.teams,
+      };
+    }
+    const fallbackTeamByAgentId = new Map(
+      helloSnapshotFallback.agents
+        .filter((a) => a.teamId !== undefined)
+        .map((a) => [a.id, a.teamId])
+    );
+    if (fallbackTeamByAgentId.size > 0) {
+      agentsResult = {
+        ...agentsResult,
+        agents: agentsResult.agents.map((agent) => {
+          if (agent.teamId === undefined && fallbackTeamByAgentId.has(agent.id)) {
+            return {
+              ...agent,
+              teamId: fallbackTeamByAgentId.get(agent.id),
+            };
+          }
+          return agent;
+        }),
+      };
+    }
+  }
   agentsResult = {
     ...agentsResult,
     agents: await Promise.all(
@@ -196,13 +249,6 @@ export async function hydrateAgentFleetFromGateway(params: {
         const listedName = typeof agent.name === "string" ? agent.name.trim() : "";
         const hasStableIdentityName =
           Boolean(identityName) && !isTemporarySkillAgentName(identityName);
-        const needsIdentityRecovery =
-          !identityName ||
-          isTemporarySkillAgentName(identityName) ||
-          isTemporarySkillAgentName(listedName);
-        if (!needsIdentityRecovery) {
-          return agent;
-        }
         if (isTemporarySkillAgentName(listedName) && hasStableIdentityName) {
           return {
             ...agent,
@@ -212,6 +258,15 @@ export async function hydrateAgentFleetFromGateway(params: {
               name: identityName,
             },
           };
+        }
+        if (isTemporarySkillAgentName(listedName) || isTemporarySkillAgentName(agent.id)) {
+          return agent;
+        }
+        const needsIdentityRecovery =
+          !identityName ||
+          isTemporarySkillAgentName(identityName);
+        if (!needsIdentityRecovery) {
+          return agent;
         }
         try {
           const result = (await params.client.call("agents.files.get", {

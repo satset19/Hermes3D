@@ -39,3 +39,6 @@ Hermes3D is a Next.js 16 frontend (TypeScript, React 19, Three.js, Phaser) for t
 
 - `npm run studio:setup` is interactive (TTY prompts) — avoid running it in non-interactive cloud environments.
 - Vitest runs in watch mode by default; always pass `--run` for CI/cloud agent use.
+
+## Antislop Enforcement
+All frontend UI, copy, and code in this repository must adhere to the antislop skill suite (`antislop`, `antislop-ui`, `antislop-layoutmobile`, `antislop-copywriting`, `antislop-code`) in `during` mode: no generic AI template aesthetics, no em dashes in copy, no dead interactive elements, and strict keyboard/contrast accessibility.

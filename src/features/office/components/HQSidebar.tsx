@@ -1,6 +1,7 @@
 "use client";
 
 import type { ReactNode } from "react";
+import Link from "next/link";
 
 export type HQSidebarTab =
   | "inbox"
@@ -112,6 +113,17 @@ export function HQSidebar({
             ANALYTICS
           </span>
         </button>
+
+        <Link
+          href="/agents"
+          className="rounded-l-md border border-r-0 border-emerald-500/25 bg-[#06120d]/90 px-1.5 py-2.5 font-mono text-[10px] font-semibold tracking-[0.2em] text-emerald-300/80 shadow-xl backdrop-blur transition-colors hover:border-emerald-400/45 hover:text-emerald-100"
+          aria-label="Team Management"
+          title="Team Management"
+        >
+          <span className="block leading-none [writing-mode:vertical-rl]">
+            TEAMS
+          </span>
+        </Link>
       </div>
 
       {open ? (
@@ -147,6 +159,15 @@ export function HQSidebar({
                 Build Company
               </button>
             ) : null}
+            {!railOnly && (
+              <Link
+                href="/agents"
+                className="mt-2 block rounded border border-emerald-500/20 bg-emerald-500/10 px-2 py-1 font-mono text-[10px] uppercase tracking-[0.16em] text-emerald-200 text-center transition-colors hover:border-emerald-400/40 hover:text-emerald-100"
+                aria-label="Manage teams (Team Management)"
+              >
+                Manage Teams
+              </Link>
+            )}
             {railOnly ? (
               <button
                 type="button"

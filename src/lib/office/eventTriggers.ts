@@ -35,7 +35,6 @@ import {
   resolveOfficeCallDirective,
   resolveOfficeDeskDirective,
   resolveOfficeGithubDirective,
-  resolveOfficeGymDirective,
   resolveOfficeQaDirective,
   resolveOfficeTextDirective,
 } from "@/lib/office/deskDirectives";
@@ -47,7 +46,6 @@ import { randomUUID } from "@/lib/uuid";
 // 2. Reconciliation rebuilds durable holds from current agent and transcript state.
 // The 3D scene only consumes the distilled result from `buildOfficeAnimationState()`.
 const WORKING_LATCH_MS = 5_000;
-const GYM_WORKOUT_LATCH_MS = 60_000;
 const STREAM_ACTIVITY_LATCH_MS = 6_000;
 const THINKING_ACTIVITY_LATCH_MS = 6_000;
 const STANDUP_TRIGGER_MAX_AGE_MS = 30_000;
@@ -92,7 +90,6 @@ export type OfficeAnimationTriggerState = {
   deskHoldByAgentId: BooleanByAgentId;
   githubDirectiveKeyByAgentId: StringByAgentId;
   githubHoldByAgentId: BooleanByAgentId;
-  gymCooldownUntilByAgentId: NumberByAgentId;
   lastManualGymCommandKeyByAgentId: StringByAgentId;
   manualGymUntilByAgentId: NumberByAgentId;
   pendingStandupRequest: OfficeStandupTriggerRequest | null;
@@ -120,7 +117,6 @@ export type OfficeAnimationState = {
   danceUntilByAgentId: NumberByAgentId;
   deskHoldByAgentId: BooleanByAgentId;
   githubHoldByAgentId: BooleanByAgentId;
-  gymHoldByAgentId: BooleanByAgentId;
   jukeboxHoldByAgentId: BooleanByAgentId;
   manualGymUntilByAgentId: NumberByAgentId;
   pendingStandupRequest: OfficeStandupTriggerRequest | null;
@@ -526,7 +522,6 @@ const hasOtherOfficeDirective = (
   Boolean(
     snapshot.desk ||
     snapshot.github ||
-    snapshot.gym ||
     snapshot.qa ||
     snapshot.art ||
     snapshot.standup ||
@@ -617,11 +612,6 @@ const pruneOfficeAnimationTriggerState = (
     githubHoldByAgentId: pruneBooleanMap(
       state.githubHoldByAgentId,
       activeAgentIds,
-    ),
-    gymCooldownUntilByAgentId: pruneFutureMap(
-      state.gymCooldownUntilByAgentId,
-      activeAgentIds,
-      nowMs,
     ),
     lastManualGymCommandKeyByAgentId: pruneStringMap(
       state.lastManualGymCommandKeyByAgentId,
@@ -792,20 +782,6 @@ const applyUserMessageTriggers = (params: {
           : { ...next.qaHoldByAgentId, [params.agentId]: true },
     };
   }
-  if (intentSnapshot.gym?.source === "manual") {
-    const gymCommandKey = normalizeCommandText(params.message);
-    next = {
-      ...next,
-      lastManualGymCommandKeyByAgentId: {
-        ...next.lastManualGymCommandKeyByAgentId,
-        [params.agentId]: gymCommandKey,
-      },
-      manualGymUntilByAgentId: {
-        ...next.manualGymUntilByAgentId,
-        [params.agentId]: params.nowMs + GYM_WORKOUT_LATCH_MS,
-      },
-    };
-  }
   if (params.agentId === "main" && intentSnapshot.standup === "standup") {
     const requestKey = `${normalizeCommandText(params.message)}:${params.nowMs}`;
     next = {
@@ -901,7 +877,6 @@ export const createOfficeAnimationTriggerState =
     deskHoldByAgentId: emptyObject(),
     githubDirectiveKeyByAgentId: emptyObject(),
     githubHoldByAgentId: emptyObject(),
-    gymCooldownUntilByAgentId: emptyObject(),
     lastManualGymCommandKeyByAgentId: emptyObject(),
     manualGymUntilByAgentId: emptyObject(),
     pendingStandupRequest: null,
@@ -1181,18 +1156,7 @@ export const reconcileOfficeAnimationTriggerState = (params: {
       qaHoldByAgentId[agentId] = true;
     }
 
-    const skillGymDirective = resolveLatestDirective({
-      lastUserMessage: agent.lastUserMessage,
-      transcriptEntries: agent.transcriptEntries,
-      resolver: resolveOfficeGymDirective,
-    });
-    if (skillGymDirective) {
-      skillGymDirectiveKeyByAgentId[agentId] = skillGymDirective.key;
-      if (skillGymDirective.directive === "gym") {
-        skillGymHoldByAgentId[agentId] = true;
-      }
-      // "release" directive clears the gym hold — do not set skillGymHoldByAgentId[agentId]
-    } else if (next.skillGymHoldByAgentId[agentId]) {
+    if (next.skillGymHoldByAgentId[agentId]) {
       skillGymHoldByAgentId[agentId] = true;
     }
 
@@ -1347,7 +1311,6 @@ export const buildOfficeAnimationState = (params: {
   const marketplaceGymHoldByAgentId = params.marketplaceGymHoldByAgentId ?? {};
   const awaitingApprovalByAgentId: BooleanByAgentId = {};
   const deskHoldByAgentId: BooleanByAgentId = {};
-  const gymHoldByAgentId: BooleanByAgentId = {};
   const jukeboxHoldByAgentId: BooleanByAgentId = {};
   const phoneBoothHoldByAgentId: BooleanByAgentId = {};
   const phoneCallByAgentId: PhoneCallByAgentId = {};
@@ -1360,14 +1323,6 @@ export const buildOfficeAnimationState = (params: {
     const agentId = agent.agentId;
     if (agent.awaitingUserInput) {
       awaitingApprovalByAgentId[agentId] = true;
-    }
-    if (
-      params.state.skillGymHoldByAgentId[agentId] ||
-      marketplaceGymHoldByAgentId[agentId] ||
-      (params.state.manualGymUntilByAgentId[agentId] ?? 0) > nowMs ||
-      (params.state.gymCooldownUntilByAgentId[agentId] ?? 0) > nowMs
-    ) {
-      gymHoldByAgentId[agentId] = true;
     }
     if ((params.state.streamingUntilByAgentId[agentId] ?? 0) > nowMs) {
       streamingByAgentId[agentId] = true;
@@ -1389,7 +1344,7 @@ export const buildOfficeAnimationState = (params: {
         smsBoothHoldByAgentId[agentId] = true;
       }
     }
-    if (params.state.deskHoldByAgentId[agentId] && !gymHoldByAgentId[agentId]) {
+    if (params.state.deskHoldByAgentId[agentId]) {
       deskHoldByAgentId[agentId] = true;
     }
   }
@@ -1400,7 +1355,6 @@ export const buildOfficeAnimationState = (params: {
     danceUntilByAgentId: {},
     deskHoldByAgentId,
     githubHoldByAgentId: params.state.githubHoldByAgentId,
-    gymHoldByAgentId,
     jukeboxHoldByAgentId,
     manualGymUntilByAgentId: params.state.manualGymUntilByAgentId,
     pendingStandupRequest: params.state.pendingStandupRequest,

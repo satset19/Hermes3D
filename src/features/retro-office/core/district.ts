@@ -26,12 +26,26 @@ export const CITY_PATH_ZONE: DistrictZone = {
   maxY: 980,
 };
 
+export const BEDROOM_ANNEX_ZONE: DistrictZone = {
+  minX: 1300,
+  maxX: 1750,
+  minY: 760,
+  maxY: 960,
+};
+
 export const REMOTE_OFFICE_ZONE: DistrictZone = {
   minX: 0,
   maxX: LOCAL_OFFICE_CANVAS_WIDTH,
   minY: 1020,
   maxY: 1020 + LOCAL_OFFICE_CANVAS_HEIGHT,
 };
+
+export const DISTRICT_ZONES: readonly DistrictZone[] = [
+  LOCAL_OFFICE_ZONE,
+  CITY_PATH_ZONE,
+  BEDROOM_ANNEX_ZONE,
+  REMOTE_OFFICE_ZONE,
+];
 
 export const REMOTE_ROAM_POINTS = [
   { x: 800, y: 1220 },
@@ -115,4 +129,44 @@ export const projectFurnitureIntoRemoteOfficeZone = (params: {
       ...(typeof item.r === "number" ? { r: item.r * scale } : {}),
     };
   });
+};
+
+export type DistrictZoneId =
+  | "bedroom_annex"
+  | "local_office"
+  | "city_path"
+  | "remote_office";
+
+export const isPointInZone = (
+  x: number,
+  y: number,
+  zone: DistrictZone,
+): boolean =>
+  x >= zone.minX && x <= zone.maxX && y >= zone.minY && y <= zone.maxY;
+
+export const isPointInDistrictZone = isPointInZone;
+
+export const resolveDistrictZone = (
+  pointOrX: number | { x: number; y: number },
+  maybeY?: number,
+): DistrictZone | undefined => {
+  const x = typeof pointOrX === "number" ? pointOrX : pointOrX.x;
+  const y = typeof pointOrX === "number" ? (maybeY ?? 0) : pointOrX.y;
+  if (isPointInZone(x, y, BEDROOM_ANNEX_ZONE)) return BEDROOM_ANNEX_ZONE;
+  if (isPointInZone(x, y, LOCAL_OFFICE_ZONE)) return LOCAL_OFFICE_ZONE;
+  if (isPointInZone(x, y, CITY_PATH_ZONE)) return CITY_PATH_ZONE;
+  if (isPointInZone(x, y, REMOTE_OFFICE_ZONE)) return REMOTE_OFFICE_ZONE;
+  return undefined;
+};
+
+export const resolveDistrictZoneId = (
+  pointOrX: number | { x: number; y: number },
+  maybeY?: number,
+): DistrictZoneId | undefined => {
+  const zone = resolveDistrictZone(pointOrX, maybeY);
+  if (zone === BEDROOM_ANNEX_ZONE) return "bedroom_annex";
+  if (zone === LOCAL_OFFICE_ZONE) return "local_office";
+  if (zone === CITY_PATH_ZONE) return "city_path";
+  if (zone === REMOTE_OFFICE_ZONE) return "remote_office";
+  return undefined;
 };

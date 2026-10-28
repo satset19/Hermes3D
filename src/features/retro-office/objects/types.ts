@@ -1,4 +1,5 @@
 import type { AgentAvatarProfile } from "@/lib/avatars/profile";
+import type { StandupMeeting } from "@/lib/office/standup/types";
 import type { RefObject } from "react";
 import type {
   FurnitureItem,
@@ -45,4 +46,10 @@ export type AgentModelProps = {
   suppressSpeechBubble?: boolean;
   /** Seat on the conversation circle, or null when not in a huddle. */
   huddleSeatIndex?: number | null;
+  standupMeeting?: StandupMeeting | null;
+  onDismissSpeech?: (id: string) => void;
+  onSpeechBubbleClick?: (id: string) => void;
+  onPointerDown?: (agentId: string, event: import("@react-three/fiber").ThreeEvent<PointerEvent>) => void;
+  isBeingDragged?: boolean;
+  scaleMultiplier?: number;
 };

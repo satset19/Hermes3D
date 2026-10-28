@@ -11,8 +11,8 @@ import {
   type PackagedSkillInstallResult,
 } from "@/lib/skills/types";
 
-const normalizeRequired = (value: string, field: string): string => {
-  const trimmed = value.trim();
+const normalizeRequired = (value: string | undefined | null, field: string): string => {
+  const trimmed = value?.trim();
   if (!trimmed) {
     throw new Error(`${field} is required.`);
   }
@@ -119,6 +119,31 @@ export const installPackagedSkillViaGatewayAgent = async (params: {
     agentName: params.request.agentName,
   });
   const files = readPackagedSkillFiles(packagedSkill.packageId);
+
+  // Fast direct installation without creating temporary installer agents:
+  try {
+    const directResult = await params.client.call<{ ok?: boolean; installedPath?: string }>(
+      "skills.writePackaged",
+      {
+        agentId: params.request.agentId,
+        skillKey: packagedSkill.skillKey,
+        files,
+      }
+    );
+    if (directResult?.ok) {
+      return {
+        installed: true,
+        installedPath:
+          directResult.installedPath ||
+          `${workspaceDir.replace(/\/+$/, "")}/skills/${packagedSkill.skillKey}`,
+        source: "hermes-workspace",
+        skillKey: packagedSkill.skillKey,
+      };
+    }
+  } catch {
+    // Gateway does not support skills.writePackaged, fall back to agent flow below
+  }
+
   const installerName = `Skill Installer ${Date.now()}`;
 
   let installerAgentId: string | null = null;
@@ -163,6 +188,11 @@ export const installPackagedSkillViaGatewayAgent = async (params: {
     };
   } finally {
     if (installerAgentId) {
+      try {
+        await params.client.call("agents.delete", { agentId: installerAgentId });
+      } catch {
+        // Best-effort cleanup for temporary installer agents.
+      }
       try {
         await removeGatewayAgentFromConfigOnly({
           client: params.client,

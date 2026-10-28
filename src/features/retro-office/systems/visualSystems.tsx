@@ -18,6 +18,7 @@ import type {
 
 const HEAT_COLS = Math.floor(CANVAS_W / SNAP_GRID);
 const HEAT_ROWS = Math.floor(CANVAS_H / SNAP_GRID);
+const MAX_HEATMAP_CELLS = HEAT_COLS * HEAT_ROWS;
 
 export function HeatmapSystem({
   agentsRef,
@@ -29,15 +30,12 @@ export function HeatmapSystem({
   heatGridRef: MutableRefObject<Uint16Array | null>;
 }) {
   const frameRef = useRef(0);
-  const cellsRef = useRef<{ x: number; z: number; v: number }[]>([]);
+  const meshRef = useRef<THREE.InstancedMesh>(null);
+  const dummy = useMemo(() => new THREE.Object3D(), []);
+  const colorHelper = useMemo(() => new THREE.Color(), []);
   const fallbackHeatGridRef = useRef<Uint16Array>(
     new Uint16Array(HEAT_COLS * HEAT_ROWS),
   );
-  const [cells, setCells] = useState<{ x: number; z: number; v: number }[]>([]);
-
-  useEffect(() => {
-    cellsRef.current = cells;
-  }, [cells]);
 
   useEffect(() => {
     if (heatGridRef.current == null) {
@@ -65,13 +63,23 @@ export function HeatmapSystem({
       }
     }
 
-    if (heatmapMode && frameRef.current % 120 === 0) {
+    if (!meshRef.current) return;
+
+    if (!heatmapMode) {
+      if (meshRef.current.count !== 0) {
+        meshRef.current.count = 0;
+        meshRef.current.instanceMatrix.needsUpdate = true;
+      }
+      return;
+    }
+
+    if (frameRef.current % 120 === 0 || meshRef.current.count === 0) {
       let maxValue = 1;
       for (let index = 0; index < grid.length; index += 1) {
         if (grid[index] > maxValue) maxValue = grid[index];
       }
 
-      const nextCells: { x: number; z: number; v: number }[] = [];
+      let instanceIdx = 0;
       for (let row = 0; row < HEAT_ROWS; row += 1) {
         for (let col = 0; col < HEAT_COLS; col += 1) {
           const value = grid[row * HEAT_COLS + col];
@@ -80,44 +88,54 @@ export function HeatmapSystem({
             col * SNAP_GRID + SNAP_GRID / 2,
             row * SNAP_GRID + SNAP_GRID / 2,
           );
-          nextCells.push({ x: wx, z: wz, v: value / maxValue });
+          const v = value / maxValue;
+          dummy.position.set(wx, 0.002, wz);
+          dummy.rotation.set(-Math.PI / 2, 0, 0);
+          dummy.scale.set(1, 1, 1);
+          dummy.updateMatrix();
+          meshRef.current.setMatrixAt(instanceIdx, dummy.matrix);
+
+          const hex = v < 0.4 ? "#f59e0b" : v < 0.75 ? "#ef4444" : "#dc2626";
+          colorHelper.set(hex);
+          meshRef.current.setColorAt(instanceIdx, colorHelper);
+          instanceIdx += 1;
         }
       }
 
-      setCells(nextCells);
-    }
-
-    if (!heatmapMode && cellsRef.current.length > 0) {
-      setCells([]);
+      meshRef.current.count = instanceIdx;
+      meshRef.current.instanceMatrix.needsUpdate = true;
+      if (meshRef.current.instanceColor) {
+        meshRef.current.instanceColor.needsUpdate = true;
+      }
     }
   });
 
-  if (!heatmapMode) return null;
-
   return (
-    <>
-      {cells.map((cell, index) => (
-        <mesh
-          key={index}
-          position={[cell.x, 0.002, cell.z]}
-          rotation={[-Math.PI / 2, 0, 0]}
-        >
-          <planeGeometry args={[SNAP_GRID * SCALE * 0.9, SNAP_GRID * SCALE * 0.9]} />
-          <meshBasicMaterial
-            color={
-              cell.v < 0.4 ? "#f59e0b" : cell.v < 0.75 ? "#ef4444" : "#dc2626"
-            }
-            transparent
-            opacity={0.15 + cell.v * 0.35}
-            depthWrite={false}
-          />
-        </mesh>
-      ))}
-    </>
+    <instancedMesh
+      ref={meshRef}
+      args={[undefined, undefined, MAX_HEATMAP_CELLS]}
+      count={0}
+      visible={heatmapMode}
+    >
+      <planeGeometry args={[SNAP_GRID * SCALE * 0.9, SNAP_GRID * SCALE * 0.9]} />
+      <meshBasicMaterial
+        transparent
+        opacity={0.35}
+        depthWrite={false}
+      />
+    </instancedMesh>
   );
 }
 
-type TrailPoint = { pos: THREE.Vector3; age: number; color: string };
+export type TrailPoint = {
+  x: number;
+  y: number;
+  z: number;
+  age: number;
+  color: string;
+};
+
+const MAX_TRAIL_POINTS = 300;
 
 export function TrailSystem({
   agentsRef,
@@ -128,7 +146,9 @@ export function TrailSystem({
 }) {
   const trailsRef = useRef<Map<string, TrailPoint[]>>(new Map());
   const frameRef = useRef(0);
-  const [points, setPoints] = useState<TrailPoint[]>([]);
+  const meshRef = useRef<THREE.InstancedMesh>(null);
+  const dummy = useMemo(() => new THREE.Object3D(), []);
+  const colorHelper = useMemo(() => new THREE.Color(), []);
 
   useFrame(() => {
     frameRef.current += 1;
@@ -139,58 +159,82 @@ export function TrailSystem({
       for (const agent of agents) {
         if (agent.state !== "walking") continue;
         const [wx, , wz] = toWorld(agent.x, agent.y);
-        const existing = trails.get(agent.id) ?? [];
+        let existing = trails.get(agent.id);
+        if (!existing) {
+          existing = [];
+          trails.set(agent.id, existing);
+        }
         existing.unshift({
-          pos: new THREE.Vector3(wx, 0.01, wz),
+          x: wx,
+          y: 0.01,
+          z: wz,
           age: 0,
           color: colorMap.get(agent.id) ?? "#888",
         });
-        if (existing.length > 6) existing.splice(6);
-        trails.set(agent.id, existing);
+        if (existing.length > 6) {
+          existing.length = 6;
+        }
       }
     }
 
-    let changed = false;
     for (const [id, trailPoints] of trails) {
-      for (const point of trailPoints) {
+      let writeIdx = 0;
+      for (let readIdx = 0; readIdx < trailPoints.length; readIdx += 1) {
+        const point = trailPoints[readIdx];
         point.age += 1;
+        if (point.age < 48) {
+          trailPoints[writeIdx] = point;
+          writeIdx += 1;
+        }
       }
-      for (let index = trailPoints.length - 1; index >= 0; index -= 1) {
-        if (trailPoints[index].age < 48) continue;
-        trailPoints.splice(index, 1);
-        changed = true;
-      }
-      if (trailPoints.length === 0) {
+      trailPoints.length = writeIdx;
+      if (writeIdx === 0) {
         trails.delete(id);
-        changed = true;
       }
     }
 
-    if (frameRef.current % 8 === 0 || changed) {
-      const nextPoints: TrailPoint[] = [];
-      for (const trailPoints of trails.values()) nextPoints.push(...trailPoints);
-      setPoints([...nextPoints]);
+    if (meshRef.current) {
+      let instanceIdx = 0;
+      for (const trailPoints of trails.values()) {
+        for (const point of trailPoints) {
+          if (instanceIdx >= MAX_TRAIL_POINTS) break;
+          dummy.position.set(point.x, point.y, point.z);
+          dummy.rotation.set(-Math.PI / 2, 0, 0);
+          const life = Math.max(0, 1 - point.age / 48);
+          dummy.scale.set(life, life, life);
+          dummy.updateMatrix();
+          meshRef.current.setMatrixAt(instanceIdx, dummy.matrix);
+
+          colorHelper.set(point.color);
+          colorHelper.multiplyScalar(Math.max(0.1, life));
+          meshRef.current.setColorAt(instanceIdx, colorHelper);
+          instanceIdx += 1;
+        }
+      }
+      const prevCount = meshRef.current.count;
+      meshRef.current.count = instanceIdx;
+      if (instanceIdx > 0 || prevCount > 0) {
+        meshRef.current.instanceMatrix.needsUpdate = true;
+        if (meshRef.current.instanceColor) {
+          meshRef.current.instanceColor.needsUpdate = true;
+        }
+      }
     }
   });
 
   return (
-    <>
-      {points.map((point, index) => (
-        <mesh
-          key={index}
-          position={[point.pos.x, point.pos.y, point.pos.z]}
-          rotation={[-Math.PI / 2, 0, 0]}
-        >
-          <circleGeometry args={[0.05, 8]} />
-          <meshBasicMaterial
-            color={point.color}
-            transparent
-            opacity={Math.max(0, (1 - point.age / 48) * 0.45)}
-            depthWrite={false}
-          />
-        </mesh>
-      ))}
-    </>
+    <instancedMesh
+      ref={meshRef}
+      args={[undefined, undefined, MAX_TRAIL_POINTS]}
+      count={0}
+    >
+      <circleGeometry args={[0.05, 8]} />
+      <meshBasicMaterial
+        transparent
+        opacity={0.45}
+        depthWrite={false}
+      />
+    </instancedMesh>
   );
 }
 

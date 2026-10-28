@@ -1,5 +1,5 @@
 // @vitest-environment node
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
@@ -37,7 +37,7 @@ describe("hermes3d MCP server", () => {
   it("forwards tool calls to the adapter with the token", async () => {
     const fetchImpl = vi.fn(async () => jsonResponse({ ok: true, run_id: "r1" }));
     const res = await handleRpc({ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "assign_task",
-      arguments: { caller_agent_id: "hermes", agent_id: "designer-1c1143", task: "t" } } }, { config, fetchImpl });
+      arguments: { caller_agent_id: "hermes", agent_id: "fe-specialist-1c1143", task: "t" } } }, { config, fetchImpl });
     expect(fetchImpl).toHaveBeenCalledWith("http://adapter.test/team/assign", expect.objectContaining({
       method: "POST", headers: expect.objectContaining({ "X-Hermes3D-Team-Token": "secret" }) }));
     expect(res.result.isError).toBe(false);
@@ -83,14 +83,14 @@ describe("hermes3d MCP server", () => {
     const port = (server.address() as AddressInfo).port;
 
     const child = spawn(process.execPath, [path.resolve("server/hermes3d-team-mcp.js")], {
-      env: { PATH: process.env.PATH, HERMES3D_ADAPTER_URL: `http://127.0.0.1:${port}`,
+      env: { ...process.env, PATH: process.env.PATH, HERMES3D_ADAPTER_URL: `http://127.0.0.1:${port}`,
         HERMES3D_TEAM_TOKEN: "tok", HERMES3D_ENV_FILE: "/nonexistent" },
-    });
+    }) as unknown as ChildProcessWithoutNullStreams;
     const lines: string[] = [];
     let buf = "";
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const reply = await new Promise<any>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error(`timeout: ${lines.join("|")}`)), 10_000);
+      const timer = setTimeout(() => reject(new Error(`timeout: ${lines.join("|\n")}`)), 10_000);
       child.stdout.on("data", (c) => {
         buf += c.toString();
         const parts = buf.split("\n");

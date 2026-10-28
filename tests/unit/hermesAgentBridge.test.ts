@@ -41,10 +41,16 @@ const startFakeHermesAgent = async (handlers: Record<string, RpcHandler>) => {
   await new Promise<void>((resolve) => wss.on("listening", () => resolve()));
 
   const received: Frame[] = [];
+  const eventSockets: WsSocket[] = [];
 
   wss.on("connection", (ws: WsSocket, req) => {
     const url = new URL(req.url ?? "/", "http://localhost");
     received.push({ __connect: true, path: url.pathname, token: url.searchParams.get("token") });
+
+    if (url.pathname === "/api/events") {
+      eventSockets.push(ws);
+      return;
+    }
 
     const send = (obj: unknown) => ws.send(JSON.stringify(obj));
     const emit = (type: string, payload: Frame) =>
@@ -70,7 +76,7 @@ const startFakeHermesAgent = async (handlers: Record<string, RpcHandler>) => {
   });
 
   const { port } = wss.address() as AddressInfo;
-  return { url: `ws://127.0.0.1:${port}`, received };
+  return { url: `ws://127.0.0.1:${port}`, received, eventSockets };
 };
 
 /** Drive the bridge and collect the frames it sends back toward the browser. */
@@ -432,6 +438,20 @@ describe("toHermes3dMessages", () => {
   it("returns an empty list for a missing transcript", () => {
     expect(toHermes3dMessages(undefined)).toEqual([]);
   });
+
+  it("normalizes timestamps from epoch seconds and ISO strings into epoch milliseconds", () => {
+    expect(
+      toHermes3dMessages([
+        { role: "user", text: "hi", timestamp: 1789055749.0 },
+        { role: "assistant", text: "hello", createdAt: "2026-04-09T10:00:00.000Z" },
+        { role: "assistant", text: "already ms", timestamp: 1789055749123 },
+      ]),
+    ).toEqual([
+      { role: "user", content: "hi", timestamp: 1789055749000 },
+      { role: "assistant", content: "hello", timestamp: Date.parse("2026-04-09T10:00:00.000Z") },
+      { role: "assistant", content: "already ms", timestamp: 1789055749123 },
+    ]);
+  });
 });
 
 describe("hermes-agent bridge", () => {
@@ -567,5 +587,115 @@ describe("hermes-agent bridge", () => {
 
     expect(res.ok).toBe(true);
     expect(at(res, "payload.models")).not.toHaveLength(0);
+  });
+
+  it("ensures sessions.list returns stable updatedAt across multiple polls", async () => {
+    const startedAtSec = 1789055000;
+    const expectedMs = startedAtSec * 1000;
+    const agent = await startFakeHermesAgent({
+      "session.list": () => ({
+        sessions: [{ id: "s1", title: "Chat", started_at: startedAtSec }],
+      }),
+    });
+    const bridge = await openBridge(agent.url);
+
+    bridge.send({ type: "req", id: "p1", method: "sessions.list", params: {} });
+    const res1 = await bridge.waitFor((f) => f.type === "res" && f.id === "p1", "sessions.list 1");
+    const sessions1 = at(res1, "payload.sessions") as { key: string; updatedAt: number | null }[];
+    const main1 = sessions1.find((s) => s.key === "agent:hermes:main");
+    expect(main1?.updatedAt).toBe(expectedMs);
+
+    // Sleep briefly to ensure Date.now() would advance if called dynamically
+    await new Promise((r) => setTimeout(r, 20));
+
+    bridge.send({ type: "req", id: "p2", method: "sessions.list", params: {} });
+    const res2 = await bridge.waitFor((f) => f.type === "res" && f.id === "p2", "sessions.list 2");
+    const sessions2 = at(res2, "payload.sessions") as { key: string; updatedAt: number | null }[];
+    const main2 = sessions2.find((s) => s.key === "agent:hermes:main");
+    expect(main2?.updatedAt).toBe(main1?.updatedAt);
+  });
+
+  it("returns stable persistent timestamps in sessions.preview", async () => {
+    const agent = await startFakeHermesAgent({
+      "session.create": () => ({ session_id: "sid-prev" }),
+      "session.history": () => ({
+        messages: [
+          { role: "user", text: "first question", timestamp: 1789055100.5 },
+          { role: "assistant", text: "first reply", timestamp: 1789055105.0 },
+        ],
+      }),
+    });
+    const bridge = await openBridge(agent.url);
+
+    // Call chat.history so session entry is known to the bridge
+    bridge.send({ type: "req", id: "ch1", method: "chat.history", params: { sessionKey: "agent:hermes:main" } });
+    await bridge.waitFor((f) => f.type === "res" && f.id === "ch1", "chat.history");
+
+    bridge.send({ type: "req", id: "prev1", method: "sessions.preview", params: { keys: ["agent:hermes:main"] } });
+    const prevRes = await bridge.waitFor((f) => f.type === "res" && f.id === "prev1", "sessions.preview");
+    const previews = at(prevRes, "payload.previews") as { key: string; items: { text: string; timestamp: number }[] }[];
+    expect(previews[0]?.items).toEqual([
+      { role: "user", text: "first question", timestamp: 1789055100500 },
+      { role: "assistant", text: "first reply", timestamp: 1789055105000 },
+    ]);
+  });
+
+  it("never broadcasts historical office.speech events on connection/reconnection", async () => {
+    const agent = await startFakeHermesAgent({});
+    const bridge = await openBridge(agent.url);
+
+    bridge.send({ type: "req", id: "c1", method: "connect", params: {} });
+    await bridge.waitFor((f) => f.type === "res" && f.id === "c1", "connect");
+
+    // Wait for office-speech subscriber socket to connect
+    const start = Date.now();
+    while (agent.eventSockets.length === 0 && Date.now() - start < 2000) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(agent.eventSockets.length).toBeGreaterThan(0);
+    const eventWs = agent.eventSockets[0]!;
+
+    // 1. Send historical turn (from before connection)
+    eventWs.send(
+      JSON.stringify({
+        kind: "agent.turn",
+        profile: "hermes",
+        text: "Old historical turn",
+        atMs: Date.now() - 5000,
+      }),
+    );
+
+    // Sleep briefly to confirm no office.speech event is emitted
+    await new Promise((r) => setTimeout(r, 50));
+    expect(bridge.frames.some((f) => f.event === "office.speech")).toBe(false);
+
+    // 2. Send live turn (future/current timestamp)
+    const liveAt = Date.now() + 1000;
+    eventWs.send(
+      JSON.stringify({
+        kind: "agent.turn",
+        profile: "hermes",
+        text: "Live speech turn",
+        atMs: liveAt,
+      }),
+    );
+
+    const speech = await bridge.waitFor((f) => f.event === "office.speech", "office.speech");
+    expect(at(speech, "payload.text")).toBe("Live speech turn");
+    expect(at(speech, "payload.atMs")).toBe(liveAt);
+
+    // 3. Re-sending identical turn is dropped as duplicate (e.g. on socket reconnect)
+    const initialCount = bridge.frames.filter((f) => f.event === "office.speech").length;
+    eventWs.send(
+      JSON.stringify({
+        kind: "agent.turn",
+        profile: "hermes",
+        text: "Live speech turn",
+        atMs: liveAt,
+      }),
+    );
+    await new Promise((r) => setTimeout(r, 50));
+    const afterCount = bridge.frames.filter((f) => f.event === "office.speech").length;
+    expect(afterCount).toBe(initialCount);
   });
 });

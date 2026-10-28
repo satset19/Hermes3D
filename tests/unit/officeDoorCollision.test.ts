@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 
 import {
   BEDROOM_DOOR_Y,
+  BEDROOM_ROOM_BOTTOM_WALL_Y,
   BEDROOM_ROOM_END_X,
+  BEDROOM_ROOM_TOP_Y,
   BEDROOM_ROOM_WIDTH,
   BEDROOM_ROOM_X,
   CANVAS_H,
@@ -222,8 +224,8 @@ describe("officeDoorCollision – collision, bukaan pintu, dan layout kamar tidu
       for (const bed of beds) {
         expect(bed.x).toBeGreaterThanOrEqual(BEDROOM_ROOM_X);
         expect(bed.x + bedWidth).toBeLessThanOrEqual(BEDROOM_ROOM_END_X);
-        expect(bed.y).toBeGreaterThan(40);
-        expect(bed.y + bedHeight).toBeLessThan(680);
+        expect(bed.y).toBeGreaterThanOrEqual(BEDROOM_ROOM_TOP_Y);
+        expect(bed.y + bedHeight).toBeLessThanOrEqual(BEDROOM_ROOM_BOTTOM_WALL_Y);
       }
     });
 

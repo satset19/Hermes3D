@@ -233,8 +233,30 @@ export function useRuntimeSyncController(
       focusedAgentRunning,
     });
     if (pollingIntent.kind === "stop") return;
-    void loadAgentHistory(pollingIntent.agentId);
+
+    const focusedAgent = agentsRef.current.find(
+      (entry) => entry.agentId === pollingIntent.agentId,
+    );
+    const isActivelyStreaming =
+      Boolean(focusedAgent?.streamText?.trim()) ||
+      Boolean(focusedAgent?.thinkingTrace?.trim());
+
+    if (!(status === "connected" && isActivelyStreaming)) {
+      void loadAgentHistory(pollingIntent.agentId);
+    }
+
     const timer = window.setInterval(() => {
+      const currentAgent = agentsRef.current.find(
+        (entry) => entry.agentId === pollingIntent.agentId,
+      );
+      // Suppress redundant focused history polling during active streaming when WebSocket is healthy
+      const streaming =
+        Boolean(currentAgent?.streamText?.trim()) ||
+        Boolean(currentAgent?.thinkingTrace?.trim());
+      if (status === "connected" && streaming) {
+        return;
+      }
+
       const shouldContinue = shouldRuntimeSyncContinueFocusedHistoryPolling({
         agentId: pollingIntent.agentId,
         agents: agentsRef.current,

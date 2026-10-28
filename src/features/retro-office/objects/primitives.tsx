@@ -229,6 +229,10 @@ export function WallSegmentModel({
   );
 }
 
+const HOLD_OPEN_DURATION_MS = 900;
+const APPROACH_TRIGGER_DISTANCE = 1.0;
+const DOOR_SWING_ANGLE = Math.PI * 0.55;
+
 export function DoorModel({
   item,
   isSelected,
@@ -255,27 +259,64 @@ export function DoorModel({
   const wood = useMemo(() => withRepeat(getWoodFloorTextures(), 0.5, 0.5), []);
   const metal = useMemo(() => getBrushedMetalTextures(), []);
   const leafPivotRef = useRef<THREE.Group>(null);
-  const openAmountRef = useRef(0);
+  const currentAngleRef = useRef(0);
+  const swingDirectionRef = useRef<-1 | 1>(-1);
+  const lastTriggerTimeRef = useRef(-Infinity);
 
-  useFrame(() => {
+  useFrame((_, delta) => {
     if (!leafPivotRef.current) return;
     const centerX = wx + width / 2;
     const centerZ = wz + depth / 2;
     const cos = Math.cos(rotY);
     const sin = Math.sin(rotY);
-    const touchPadX = width * 0.5 + 0.2;
-    const touchPadZ = depth * 0.5 + 0.2;
-    const shouldOpen = (agentsRef?.current ?? []).some((agent) => {
+    const lateralTrigger = width * 0.5 + 0.25;
+    const approachTrigger = APPROACH_TRIGGER_DISTANCE;
+
+    const agents = agentsRef?.current ?? [];
+    let nearestAgent: { localX: number; localZ: number; distSq: number } | null = null;
+
+    for (const agent of agents) {
       const [ax, , az] = toWorld(agent.x, agent.y);
       const dx = ax - centerX;
       const dz = az - centerZ;
-      const localX = dx * cos + dz * sin;
-      const localZ = -dx * sin + dz * cos;
-      return Math.abs(localX) <= touchPadX && Math.abs(localZ) <= touchPadZ;
-    });
-    const targetOpen = shouldOpen ? 1 : 0;
-    openAmountRef.current = THREE.MathUtils.lerp(openAmountRef.current, targetOpen, 0.14);
-    leafPivotRef.current.rotation.y = -openAmountRef.current * Math.PI * 0.55;
+      const localX = dx * cos - dz * sin;
+      const localZ = dx * sin + dz * cos;
+      if (Math.abs(localX) <= lateralTrigger && Math.abs(localZ) <= approachTrigger) {
+        const distSq = localX * localX + localZ * localZ;
+        if (!nearestAgent || distSq < nearestAgent.distSq) {
+          nearestAgent = { localX, localZ, distSq };
+        }
+      }
+    }
+
+    const now = performance.now();
+    const wasOpen = now - lastTriggerTimeRef.current < HOLD_OPEN_DURATION_MS;
+
+    if (nearestAgent !== null) {
+      lastTriggerTimeRef.current = now;
+      if (!wasOpen || Math.abs(currentAngleRef.current) < 0.05) {
+        swingDirectionRef.current = nearestAgent.localZ < 0 ? -1 : 1;
+      }
+    }
+
+    const isHoldActive = now - lastTriggerTimeRef.current < HOLD_OPEN_DURATION_MS;
+    const shouldOpen = nearestAgent !== null || isHoldActive;
+    const targetAngle = shouldOpen ? swingDirectionRef.current * DOOR_SWING_ANGLE : 0;
+    const lambda = shouldOpen ? 14 : 6;
+    const safeDelta = Math.min(delta, 0.1);
+
+    currentAngleRef.current = THREE.MathUtils.damp(
+      currentAngleRef.current,
+      targetAngle,
+      lambda,
+      safeDelta,
+    );
+
+    if (!shouldOpen && Math.abs(currentAngleRef.current) < 0.005) {
+      currentAngleRef.current = 0;
+    }
+
+    leafPivotRef.current.rotation.y = currentAngleRef.current;
   });
 
   return (
@@ -408,7 +449,7 @@ export function KeyboardModel({
         onPointerOut?.();
       }}
     >
-      <mesh castShadow receiveShadow>
+      <mesh receiveShadow>
         <boxGeometry args={[0.27, 0.022, 0.105]} />
         <meshStandardMaterial
           color="#b2bac4"
@@ -418,7 +459,7 @@ export function KeyboardModel({
           metalness={0.75}
         />
       </mesh>
-      <mesh position={[0, 0.018, 0]} castShadow>
+      <mesh position={[0, 0.018, 0]} receiveShadow>
         <boxGeometry args={[0.23, 0.008, 0.08]} />
         <meshStandardMaterial color="#2e333d" roughness={0.85} metalness={0.02} />
       </mesh>
@@ -455,11 +496,11 @@ export function MouseModel({
         onPointerOut?.();
       }}
     >
-      <mesh scale={[1, 0.38, 0.72]} castShadow receiveShadow>
+      <mesh scale={[1, 0.38, 0.72]} receiveShadow>
         <sphereGeometry args={[0.042, 8, 6]} />
         <meshStandardMaterial color="#d0cecc" roughness={0.35} metalness={0.1} />
       </mesh>
-      <mesh position={[0, 0.016, -0.008]} rotation={[Math.PI / 2, 0, 0]}>
+      <mesh position={[0, 0.016, -0.008]} rotation={[Math.PI / 2, 0, 0]} receiveShadow>
         <cylinderGeometry args={[0.007, 0.007, 0.022, 8]} />
         <meshStandardMaterial color="#444" roughness={0.6} />
       </mesh>
@@ -564,7 +605,7 @@ export function TrashCanModel({
         onPointerOut?.();
       }}
     >
-      <mesh position={[0, 0.115, 0]} castShadow receiveShadow>
+      <mesh position={[0, 0.115, 0]} receiveShadow>
         <cylinderGeometry args={[0.055, 0.042, 0.23, 10]} />
         <meshStandardMaterial
           color="#6e747e"
@@ -574,7 +615,7 @@ export function TrashCanModel({
           metalness={0.85}
         />
       </mesh>
-      <mesh position={[0, 0.234, 0]} castShadow>
+      <mesh position={[0, 0.234, 0]} receiveShadow>
         <cylinderGeometry args={[0.057, 0.057, 0.01, 10]} />
         <meshStandardMaterial
           color="#565b63"
@@ -617,7 +658,7 @@ export function MugModel({
         onPointerOut?.();
       }}
     >
-      <mesh castShadow>
+      <mesh receiveShadow>
         <cylinderGeometry args={[0.025, 0.022, 0.052, 10]} />
         <meshPhysicalMaterial
           color="#e8ded0"
@@ -627,7 +668,7 @@ export function MugModel({
           clearcoatRoughness={0.15}
         />
       </mesh>
-      <mesh position={[0.033, 0, 0]} rotation={[0, 0, -Math.PI / 2]} castShadow>
+      <mesh position={[0.033, 0, 0]} rotation={[0, 0, -Math.PI / 2]} receiveShadow>
         <torusGeometry args={[0.016, 0.006, 6, 12, Math.PI]} />
         <meshPhysicalMaterial
           color="#e8ded0"
@@ -640,3 +681,10 @@ export function MugModel({
     </group>
   );
 }
+
+export {
+  KeyboardModel as PrimitiveKeyboardModel,
+  MouseModel as PrimitiveMouseModel,
+  MugModel as PrimitiveMugModel,
+  TrashCanModel as PrimitiveTrashCanModel,
+};

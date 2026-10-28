@@ -35,9 +35,9 @@ const REMOVABLE_SOURCES = new Set<RemovableSkillSource>([
   "hermes-workspace",
 ]);
 
-const trimNonEmpty = (value: string): string | null => {
-  const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : null;
+const trimNonEmpty = (value: string | undefined | null): string | null => {
+  const trimmed = value?.trim();
+  return trimmed && trimmed.length > 0 ? trimmed : null;
 };
 
 const OS_LABELS: Record<string, string> = {
@@ -47,9 +47,9 @@ const OS_LABELS: Record<string, string> = {
   windows: "Windows",
 };
 
-const toOsLabel = (value: string): string => {
-  const normalized = value.trim().toLowerCase();
-  return OS_LABELS[normalized] ?? value.trim();
+const toOsLabel = (value: string | undefined | null): string => {
+  const normalized = value?.trim().toLowerCase() ?? "";
+  return OS_LABELS[normalized] ?? value?.trim() ?? "";
 };
 
 const normalizeStringList = (values: string[] | undefined): string[] => {

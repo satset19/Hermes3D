@@ -71,15 +71,7 @@ export const ITEM_FOOTPRINT: Record<string, [number, number]> = {
   kanban_board: [130, 65],
   device_rack: [70, 36],
   test_bench: [90, 42],
-  treadmill: [70, 35],
-  weight_bench: [90, 45],
-  dumbbell_rack: [80, 28],
-  exercise_bike: [45, 65],
-  punching_bag: [28, 28],
   jukebox: [60, 40],
-  rowing_machine: [90, 34],
-  kettlebell_rack: [70, 26],
-  yoga_mat: [70, 30],
   keyboard: [30, 14],
   mouse: [16, 10],
   trash: [20, 20],
@@ -155,16 +147,7 @@ export const ITEM_METADATA: Record<string, { blocksNavigation: boolean; navPaddi
   kanban_board:    { blocksNavigation: true  },
   device_rack:     { blocksNavigation: true  },
   test_bench:      { blocksNavigation: true  },
-  // ── gym ───────────────────────────────────────────────────────────────────
-  treadmill:       { blocksNavigation: true  },
-  weight_bench:    { blocksNavigation: true  },
-  dumbbell_rack:   { blocksNavigation: true  },
-  exercise_bike:   { blocksNavigation: true  },
-  punching_bag:    { blocksNavigation: true  },
   jukebox:         { blocksNavigation: true  },
-  rowing_machine:  { blocksNavigation: true  },
-  kettlebell_rack: { blocksNavigation: true  },
-  yoga_mat:        { blocksNavigation: true  },
   // ── art room ──────────────────────────────────────────────────────────────
   easel:           { blocksNavigation: true  }, // floor-standing prop (issue #4)
   // ── water cooler ──────────────────────────────────────────────────────────

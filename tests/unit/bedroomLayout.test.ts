@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   BEDROOM_DOOR_Y,
+  BEDROOM_ROOM_BOTTOM_WALL_Y,
   BEDROOM_ROOM_END_X,
+  BEDROOM_ROOM_HEIGHT,
+  BEDROOM_ROOM_TOP_Y,
   BEDROOM_ROOM_WIDTH,
   BEDROOM_ROOM_X,
   CANVAS_H,
@@ -31,10 +34,13 @@ const isPointBlocked = (grid: Uint8Array, x: number, y: number): boolean => {
 
 describe("Bedroom Suite Layout & Navigation", () => {
   it("defines bedroom constants correctly", () => {
-    expect(BEDROOM_ROOM_X).toBe(1540);
-    expect(BEDROOM_ROOM_WIDTH).toBe(250);
-    expect(BEDROOM_ROOM_END_X).toBe(1790);
-    expect(BEDROOM_DOOR_Y).toBe(280);
+    expect(BEDROOM_ROOM_X).toBe(1300);
+    expect(BEDROOM_ROOM_WIDTH).toBe(450);
+    expect(BEDROOM_ROOM_END_X).toBe(1750);
+    expect(BEDROOM_ROOM_TOP_Y).toBe(760);
+    expect(BEDROOM_ROOM_HEIGHT).toBe(200);
+    expect(BEDROOM_ROOM_BOTTOM_WALL_Y).toBe(960);
+    expect(BEDROOM_DOOR_Y).toBe(840);
   });
 
   it("registers bed footprint and navigation metadata", () => {
@@ -53,8 +59,8 @@ describe("Bedroom Suite Layout & Navigation", () => {
     for (const bed of beds) {
       expect(bed.x).toBeGreaterThanOrEqual(BEDROOM_ROOM_X);
       expect(bed.x + 48).toBeLessThanOrEqual(BEDROOM_ROOM_END_X);
-      expect(bed.y).toBeGreaterThan(40);
-      expect(bed.y).toBeLessThan(680);
+      expect(bed.y).toBeGreaterThanOrEqual(BEDROOM_ROOM_TOP_Y);
+      expect(bed.y + 76).toBeLessThanOrEqual(BEDROOM_ROOM_BOTTOM_WALL_Y);
     }
   });
 

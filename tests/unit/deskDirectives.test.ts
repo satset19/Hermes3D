@@ -38,14 +38,12 @@ describe("deskDirectives", () => {
   });
 
   it("builds a unified office intent snapshot", () => {
-    expect(resolveOfficeIntentSnapshot("Let's go to the gym.")).toMatchObject({
-      gym: { directive: "gym", source: "manual" },
-      desk: null,
+    expect(resolveOfficeIntentSnapshot("Go to your desk.")).toMatchObject({
+      desk: "desk",
       standup: null,
     });
     expect(resolveOfficeIntentSnapshot("lets have a scrum meeting")).toMatchObject({
       standup: "standup",
-      gym: null,
       qa: null,
     });
   });

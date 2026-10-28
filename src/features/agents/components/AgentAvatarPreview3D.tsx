@@ -31,10 +31,38 @@ const PreviewFigure = ({
     groupRef.current.rotation.y = Math.sin(state.clock.elapsedTime * 0.45) * 0.35 + 0.25;
   });
 
-  const presetModelUrl = findAnimePresetModelUrl(profile.imageUrl);
+  const rawUrl = profile.imageUrl?.trim() ?? "";
+  const isDirect3DModel =
+    rawUrl.startsWith("blob:") ||
+    rawUrl.endsWith(".glb") ||
+    rawUrl.endsWith(".gltf") ||
+    rawUrl.endsWith(".vrm");
+  const presetModelUrl = isDirect3DModel ? rawUrl : findAnimePresetModelUrl(profile.imageUrl);
+  const figureScale = profile.scale ?? 1.0;
+  const avatarColors = useMemo(
+    () => ({
+      skin: profile.body.skinTone,
+      hair: profile.hair.color,
+      top: profile.clothing.topColor,
+      bottom: profile.clothing.bottomColor,
+      shoes: profile.clothing.shoesColor,
+    }),
+    [
+      profile.body.skinTone,
+      profile.hair.color,
+      profile.clothing.topColor,
+      profile.clothing.bottomColor,
+      profile.clothing.shoesColor,
+    ],
+  );
+
   if (presetModelUrl) {
     return (
-      <group ref={groupRef} position={[0, 0, 0]}>
+      <group
+        ref={groupRef}
+        position={[0, 0, 0]}
+        scale={[figureScale, figureScale, figureScale]}
+      >
         <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.01, 0]}>
           <circleGeometry args={[0.28, 24]} />
           <meshBasicMaterial color="#000000" transparent opacity={0.16} />
@@ -44,13 +72,7 @@ const PreviewFigure = ({
             modelUrl={presetModelUrl}
             animationName="idle"
             targetHeight={1.2}
-            colors={{
-              skin: profile.body.skinTone,
-              hair: profile.hair.color,
-              top: profile.clothing.topColor,
-              bottom: profile.clothing.bottomColor,
-              shoes: profile.clothing.shoesColor,
-            }}
+            colors={avatarColors}
           />
         </Suspense>
       </group>
@@ -69,7 +91,11 @@ const PreviewFigure = ({
   const bottomStyle = profile.clothing.bottomStyle;
 
   return (
-    <group ref={groupRef} position={[0, 0, 0]} scale={[1.4, 1.4, 1.4]}>
+    <group
+      ref={groupRef}
+      position={[0, 0, 0]}
+      scale={[1.4 * figureScale, 1.4 * figureScale, 1.4 * figureScale]}
+    >
       <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0.01, 0]}>
         <circleGeometry args={[0.22, 24]} />
         <meshBasicMaterial color="#000000" transparent opacity={0.16} />

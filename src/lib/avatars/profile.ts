@@ -36,6 +36,7 @@ export type AgentAvatarProfile = {
     backpack: boolean;
   };
   imageUrl?: string | null;
+  scale?: number;
 };
 
 type ColorOption = {
@@ -221,6 +222,7 @@ export const createAgentAvatarProfileFromSeed = (seed: string): AgentAvatarProfi
       backpack: Boolean((hash >>> 21) % 2),
     },
     imageUrl: null,
+    scale: 1.0,
   };
 };
 
@@ -316,5 +318,9 @@ export const normalizeAgentAvatarProfile = (
           : baseProfile.accessories.backpack,
     },
     imageUrl: resolveImageUrl(value.imageUrl),
+    scale:
+      typeof value.scale === "number" && !Number.isNaN(value.scale)
+        ? Math.min(1.5, Math.max(0.7, value.scale))
+        : 1.0,
   };
 };

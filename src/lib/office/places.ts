@@ -2,7 +2,6 @@ export const OFFICE_INTERACTION_TARGETS = [
   "desk",
   "server_room",
   "meeting_room",
-  "gym",
   "jukebox",
   "qa_lab",
   "sms_booth",
@@ -16,7 +15,6 @@ export type OfficeInteractionTargetId =
 export const OFFICE_SKILL_TRIGGER_MOVEMENT_TARGETS = [
   "desk",
   "github",
-  "gym",
   "jukebox",
   "qa_lab",
 ] as const;
@@ -27,7 +25,6 @@ export type OfficeSkillTriggerMovementTarget =
 type OfficeSkillTriggerAnimationHoldKey =
   | "deskHoldByAgentId"
   | "githubHoldByAgentId"
-  | "gymHoldByAgentId"
   | "jukeboxHoldByAgentId"
   | "qaHoldByAgentId";
 
@@ -37,7 +34,6 @@ export const OFFICE_SKILL_TRIGGER_PLACE_REGISTRY: Record<
     label: string;
     interactionTarget: OfficeInteractionTargetId;
     animationHoldKey: OfficeSkillTriggerAnimationHoldKey;
-    alsoSetsSkillGymHold?: boolean;
   }
 > = {
   desk: {
@@ -49,12 +45,6 @@ export const OFFICE_SKILL_TRIGGER_PLACE_REGISTRY: Record<
     label: "GitHub / Server Room",
     interactionTarget: "server_room",
     animationHoldKey: "githubHoldByAgentId",
-  },
-  gym: {
-    label: "Gym",
-    interactionTarget: "gym",
-    animationHoldKey: "gymHoldByAgentId",
-    alsoSetsSkillGymHold: true,
   },
   jukebox: {
     label: "Jukebox",
@@ -129,26 +119,19 @@ export const buildOfficeSkillTriggerHoldMaps = (
 ): {
   deskHoldByAgentId: Record<string, boolean>;
   githubHoldByAgentId: Record<string, boolean>;
-  gymHoldByAgentId: Record<string, boolean>;
   jukeboxHoldByAgentId: Record<string, boolean>;
   qaHoldByAgentId: Record<string, boolean>;
-  skillGymHoldByAgentId: Record<string, boolean>;
 } => {
   const next = {
     deskHoldByAgentId: {} as Record<string, boolean>,
     githubHoldByAgentId: {} as Record<string, boolean>,
-    gymHoldByAgentId: {} as Record<string, boolean>,
     jukeboxHoldByAgentId: {} as Record<string, boolean>,
     qaHoldByAgentId: {} as Record<string, boolean>,
-    skillGymHoldByAgentId: {} as Record<string, boolean>,
   };
 
   for (const [agentId, target] of Object.entries(movementTargetByAgentId)) {
     const place = OFFICE_SKILL_TRIGGER_PLACE_REGISTRY[target];
     next[place.animationHoldKey][agentId] = true;
-    if (place.alsoSetsSkillGymHold) {
-      next.skillGymHoldByAgentId[agentId] = true;
-    }
   }
 
   return next;

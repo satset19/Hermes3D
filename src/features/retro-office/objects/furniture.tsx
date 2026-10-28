@@ -96,15 +96,16 @@ export const FURNITURE_TINT: Record<string, string | null> = {
 
 const furnitureTemplateCache = new Map<string, THREE.Object3D>();
 
-type InstancedFurnitureMeshDef = {
+export type InstancedFurnitureMeshDef = {
   castShadow: boolean;
   geometry: THREE.BufferGeometry;
-  material: THREE.Material;
+  material: THREE.Material | THREE.Material[];
   matrixWorld: THREE.Matrix4;
+  name?: string;
   receiveShadow: boolean;
 };
 
-const resolveFurnitureTemplate = (params: {
+export const resolveFurnitureTemplate = (params: {
   glbPath: string;
   itemColor: string | undefined;
   itemType: string;
@@ -166,10 +167,22 @@ const resolveFurnitureTemplate = (params: {
   return template;
 };
 
-const buildFurnitureItemMatrix = (item: FurnitureItem, itemType: string) => {
+export const buildFurnitureItemMatrix = (
+  item: FurnitureItem,
+  itemType?: string,
+) => {
+  const resolvedType = item.type
+    ? resolveItemTypeKey(item)
+    : (itemType ?? "table_rect");
+  const activeType = itemType ?? resolvedType;
   const [wx, , wz] = toWorld(item.x, item.y);
-  const yOffset = (FURNITURE_Y_OFFSET[itemType] ?? 0) + (item.elevation ?? 0);
-  const scale = FURNITURE_SCALE[itemType] ?? [1, 1, 1];
+  const yOffset =
+    (FURNITURE_Y_OFFSET[resolvedType] ??
+      FURNITURE_Y_OFFSET[activeType] ??
+      0) + (item.elevation ?? 0);
+  const scale =
+    FURNITURE_SCALE[resolvedType] ??
+    FURNITURE_SCALE[activeType] ?? [1, 1, 1];
   const rotY = getItemRotationRadians(item);
   const { width, height } = getItemBaseSize(item);
   const pivotX = width * SCALE * 0.5;
@@ -701,28 +714,57 @@ export function BedModel({
   );
 }
 
+export type InstancedFurnitureItemsProps = {
+  itemType?: string;
+  items: FurnitureItem[];
+  itemColor?: string;
+  onItemClick?: (itemUid: string) => void;
+  onClick?: (itemUid: string) => void;
+  onItemPointerDown?: (itemUid: string) => void;
+  onPointerDown?: (itemUid: string) => void;
+  onItemPointerOver?: (itemUid: string) => void;
+  onPointerOver?: (itemUid: string) => void;
+  onItemPointerOut?: (itemUid?: string) => void;
+  onPointerOut?: () => void;
+  onItemHover?: (itemUid: string | null) => void;
+  selectedUid?: string | null;
+  hoverUid?: string | null;
+};
+
 export function InstancedFurnitureItems({
   itemType,
   items,
+  itemColor,
   onItemClick,
-}: {
-  itemType: string;
-  items: FurnitureItem[];
-  onItemClick?: (itemUid: string) => void;
-}) {
-  const glbPath = FURNITURE_GLB[itemType] ?? FURNITURE_GLB.table_rect;
+  onClick,
+  onItemPointerDown,
+  onPointerDown,
+  onItemPointerOver,
+  onPointerOver,
+  onItemPointerOut,
+  onPointerOut,
+  onItemHover,
+}: InstancedFurnitureItemsProps) {
+  const resolvedFirstType = items[0]?.type
+    ? resolveItemTypeKey(items[0])
+    : "table_rect";
+  const effectiveItemType = itemType ?? resolvedFirstType;
+  const glbPath =
+    FURNITURE_GLB[effectiveItemType] ?? FURNITURE_GLB.table_rect;
   const { scene } = useGLTF(glbPath);
   const template = useMemo(
     () =>
       resolveFurnitureTemplate({
         glbPath,
-        itemColor: undefined,
-        itemType,
+        itemColor: itemColor ?? items[0]?.color,
+        itemType: effectiveItemType,
         scene,
       }),
-    [glbPath, itemType, scene],
+    [effectiveItemType, glbPath, itemColor, items, scene],
   );
   const meshRefs = useRef<Array<THREE.InstancedMesh | null>>([]);
+  const lastHoveredUidRef = useRef<string | null>(null);
+
   const meshDefs = useMemo<InstancedFurnitureMeshDef[]>(() => {
     template.updateMatrixWorld(true);
     const nextDefs: InstancedFurnitureMeshDef[] = [];
@@ -734,15 +776,18 @@ export function InstancedFurnitureItems({
         geometry: mesh.geometry,
         material: mesh.material as THREE.Material,
         matrixWorld: mesh.matrixWorld.clone(),
+        name: mesh.name,
         receiveShadow: mesh.receiveShadow,
       });
     });
     return nextDefs;
   }, [template]);
+
   const itemMatrices = useMemo(
-    () => items.map((item) => buildFurnitureItemMatrix(item, itemType)),
-    [itemType, items],
+    () => items.map((item) => buildFurnitureItemMatrix(item, effectiveItemType)),
+    [effectiveItemType, items],
   );
+
   const itemUidByInstanceId = useMemo(
     () => items.map((item) => item._uid),
     [items],
@@ -750,23 +795,92 @@ export function InstancedFurnitureItems({
 
   const handleClick = useMemo(
     () =>
-      onItemClick
+      onClick || onItemClick
         ? (event: ThreeEvent<MouseEvent>) => {
             event.stopPropagation();
             const instanceId = event.instanceId;
             if (typeof instanceId !== "number") return;
             const itemUid = itemUidByInstanceId[instanceId];
             if (!itemUid) return;
-            onItemClick(itemUid);
+            onClick?.(itemUid);
+            onItemClick?.(itemUid);
           }
         : undefined,
-    [itemUidByInstanceId, onItemClick],
+    [itemUidByInstanceId, onClick, onItemClick],
+  );
+
+  const handlePointerDown = useMemo(
+    () =>
+      onPointerDown || onItemPointerDown
+        ? (event: ThreeEvent<PointerEvent>) => {
+            event.stopPropagation();
+            const instanceId = event.instanceId;
+            if (typeof instanceId !== "number") return;
+            const itemUid = itemUidByInstanceId[instanceId];
+            if (!itemUid) return;
+            onPointerDown?.(itemUid);
+            onItemPointerDown?.(itemUid);
+          }
+        : undefined,
+    [itemUidByInstanceId, onPointerDown, onItemPointerDown],
+  );
+
+  const handlePointerOver = useMemo(
+    () =>
+      onPointerOver || onItemPointerOver || onItemHover
+        ? (event: ThreeEvent<PointerEvent>) => {
+            event.stopPropagation();
+            const instanceId = event.instanceId;
+            if (typeof instanceId !== "number") return;
+            const itemUid = itemUidByInstanceId[instanceId];
+            if (!itemUid) return;
+            lastHoveredUidRef.current = itemUid;
+            onPointerOver?.(itemUid);
+            onItemPointerOver?.(itemUid);
+            onItemHover?.(itemUid);
+          }
+        : undefined,
+    [itemUidByInstanceId, onPointerOver, onItemPointerOver, onItemHover],
+  );
+
+  const handlePointerOut = useMemo(
+    () =>
+      onPointerOut || onItemPointerOut || onItemHover
+        ? (event: ThreeEvent<PointerEvent>) => {
+            event.stopPropagation();
+            const previousUid = lastHoveredUidRef.current ?? undefined;
+            lastHoveredUidRef.current = null;
+            onPointerOut?.();
+            onItemPointerOut?.(previousUid);
+            onItemHover?.(null);
+          }
+        : undefined,
+    [onPointerOut, onItemPointerOut, onItemHover],
+  );
+
+  const handlePointerMove = useMemo(
+    () =>
+      onPointerOver || onItemPointerOver || onItemHover
+        ? (event: ThreeEvent<PointerEvent>) => {
+            const instanceId = event.instanceId;
+            if (typeof instanceId !== "number") return;
+            const itemUid = itemUidByInstanceId[instanceId];
+            if (!itemUid || itemUid === lastHoveredUidRef.current) return;
+            event.stopPropagation();
+            lastHoveredUidRef.current = itemUid;
+            onPointerOver?.(itemUid);
+            onItemPointerOver?.(itemUid);
+            onItemHover?.(itemUid);
+          }
+        : undefined,
+    [itemUidByInstanceId, onPointerOver, onItemPointerOver, onItemHover],
   );
 
   useLayoutEffect(() => {
     meshDefs.forEach((def, meshIndex) => {
       const instancedMesh = meshRefs.current[meshIndex];
       if (!instancedMesh) return;
+      instancedMesh.count = itemMatrices.length;
       const worldMatrix = new THREE.Matrix4();
       for (let itemIndex = 0; itemIndex < itemMatrices.length; itemIndex += 1) {
         worldMatrix.multiplyMatrices(itemMatrices[itemIndex], def.matrixWorld);
@@ -783,19 +897,25 @@ export function InstancedFurnitureItems({
     <>
       {meshDefs.map((def, meshIndex) => (
         <instancedMesh
-          key={`${itemType}-${meshIndex}`}
+          key={`${effectiveItemType}-${meshIndex}`}
           ref={(node) => {
             meshRefs.current[meshIndex] = node;
           }}
-          args={[def.geometry, def.material, items.length]}
+          args={[def.geometry, def.material as any, items.length]}
           castShadow={def.castShadow}
           receiveShadow={def.receiveShadow}
           onClick={handleClick}
+          onPointerDown={handlePointerDown}
+          onPointerOver={handlePointerOver}
+          onPointerOut={handlePointerOut}
+          onPointerMove={handlePointerMove}
         />
       ))}
     </>
   );
 }
+
+export const InstancedFurnitureItemsModel = InstancedFurnitureItems;
 
 export function FurnitureModel({
   item,

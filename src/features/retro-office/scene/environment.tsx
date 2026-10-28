@@ -2,17 +2,17 @@
 
 import { memo, useMemo, type ReactNode } from "react";
 import {
+  BEDROOM_DOOR_Y,
   CANVAS_H,
   CANVAS_W,
   EAST_WING_ROOM_HEIGHT,
   EAST_WING_ROOM_TOP_Y,
-  GYM_ROOM_WIDTH,
-  GYM_ROOM_X,
   QA_LAB_WIDTH,
   QA_LAB_X,
   SCALE,
 } from "@/features/retro-office/core/constants";
 import {
+  BEDROOM_ANNEX_ZONE,
   CITY_PATH_ZONE,
   LOCAL_OFFICE_CANVAS_HEIGHT,
   LOCAL_OFFICE_CANVAS_WIDTH,
@@ -290,11 +290,7 @@ export const FloorAndWalls = memo(function FloorAndWalls({
     LOCAL_OFFICE_CANVAS_WIDTH / 2,
     LOCAL_OFFICE_CANVAS_HEIGHT / 2,
   );
-  const [gymZoneCenterX, , roomZoneCenterZ] = toWorld(
-    GYM_ROOM_X + GYM_ROOM_WIDTH / 2,
-    EAST_WING_ROOM_TOP_Y + EAST_WING_ROOM_HEIGHT / 2,
-  );
-  const [qaZoneCenterX] = toWorld(
+  const [qaZoneCenterX, , roomZoneCenterZ] = toWorld(
     QA_LAB_X + QA_LAB_WIDTH / 2,
     EAST_WING_ROOM_TOP_Y + EAST_WING_ROOM_HEIGHT / 2,
   );
@@ -306,12 +302,10 @@ export const FloorAndWalls = memo(function FloorAndWalls({
     (REMOTE_OFFICE_ZONE.minX + REMOTE_OFFICE_ZONE.maxX) / 2,
     (REMOTE_OFFICE_ZONE.minY + REMOTE_OFFICE_ZONE.maxY) / 2,
   );
-  const gymZoneWidth = Math.max(0, GYM_ROOM_WIDTH * SCALE);
   const qaZoneWidth = Math.max(0, QA_LAB_WIDTH * SCALE);
   const roomZoneHeight = EAST_WING_ROOM_HEIGHT * SCALE;
   const roomFloorInset = 0.08;
   const roomZoneFloorHeight = Math.max(0, roomZoneHeight - roomFloorInset * 2);
-  const gymZoneFloorWidth = Math.max(0, gymZoneWidth - roomFloorInset * 2);
   const qaZoneFloorWidth = Math.max(0, qaZoneWidth - roomFloorInset * 2);
   const qaZoneStripeHeight = roomZoneFloorHeight * 0.86;
   const qaZoneStripeWidth = qaZoneFloorWidth * 0.92;
@@ -328,18 +322,48 @@ export const FloorAndWalls = memo(function FloorAndWalls({
   const [southWallLeftCenterX] = toWorld(southWallDoorOpeningStartX / 2, 0);
   const [southWallRightCenterX] = toWorld((southWallDoorOpeningEndX + LOCAL_OFFICE_CANVAS_WIDTH) / 2, 0);
   const [southWallDoorwayCenterX] = toWorld((southWallDoorOpeningStartX + southWallDoorOpeningEndX) / 2, 0);
+  const bedroomDeckWidth =
+    (BEDROOM_ANNEX_ZONE.maxX - BEDROOM_ANNEX_ZONE.minX) * SCALE;
+  const bedroomDeckHeight =
+    (BEDROOM_ANNEX_ZONE.maxY - BEDROOM_ANNEX_ZONE.minY) * SCALE;
+  const [bedroomDeckCenterX, , bedroomDeckCenterZ] = toWorld(
+    (BEDROOM_ANNEX_ZONE.minX + BEDROOM_ANNEX_ZONE.maxX) / 2,
+    (BEDROOM_ANNEX_ZONE.minY + BEDROOM_ANNEX_ZONE.maxY) / 2,
+  );
+  const walkwaySouthWidth = southWallDoorwayWidth;
+  const walkwayCorridorWidth = 70 * SCALE;
+  const [walkwaySouthCenterX, , walkwaySouthCenterZ] = toWorld(
+    (southWallDoorOpeningStartX + southWallDoorOpeningEndX) / 2,
+    (LOCAL_OFFICE_CANVAS_HEIGHT + (BEDROOM_DOOR_Y - 35)) / 2,
+  );
+  const walkwaySouthLength =
+    (BEDROOM_DOOR_Y - 35 - LOCAL_OFFICE_CANVAS_HEIGHT) * SCALE;
+  const [walkwayEastCenterX, , walkwayEastCenterZ] = toWorld(
+    (southWallDoorOpeningStartX + BEDROOM_ANNEX_ZONE.minX) / 2,
+    BEDROOM_DOOR_Y,
+  );
+  const walkwayEastLength =
+    (BEDROOM_ANNEX_ZONE.minX - southWallDoorOpeningStartX) * SCALE;
+  const walkwayEastWidth = walkwayCorridorWidth;
   const groundCenterX = showRemoteOffice ? districtCenterX : localOfficeCenterX;
   const groundCenterZ = showRemoteOffice ? districtCenterZ : localOfficeCenterZ;
   const groundWidth = showRemoteOffice ? districtWidth : localOfficeWidth;
   const groundHeight = showRemoteOffice ? districtHeight : localOfficeHeight;
   const woodFloor = useMemo(() => withRepeat(getWoodFloorTextures(), 12, 5), []);
+  const bedroomDeckWood = useMemo(
+    () => withRepeat(getWoodFloorTextures(), 8, 4),
+    [],
+  );
   const districtConcrete = useMemo(
     () => withRepeat(getConcreteTextures(), 10, 10),
     [],
   );
   const pathGrass = useMemo(() => withRepeat(getGrassTextures(), 14, 2), []);
   const pathConcrete = useMemo(() => withRepeat(getConcreteTextures(), 8, 1), []);
-  const gymRubber = useMemo(() => withRepeat(getCarpetTextures(), 6, 4), []);
+  const walkwayConcrete = useMemo(
+    () => withRepeat(getConcreteTextures(), 8, 2),
+    [],
+  );
 
   return (
     <group>
@@ -462,37 +486,32 @@ export const FloorAndWalls = memo(function FloorAndWalls({
           {/* Garden Workspace in CITY_PATH_ZONE (Y: 780 to 940, X: 600 to 1200) */}
           <GardenWorkspace />
 
-          {Array.from({ length: 8 })
-            .map((_, index) => {
-              const bedX = 330 + index * 170;
-              if (bedX >= 580 && bedX <= 1220) return null;
-              const [wx, , wz] = toWorld(bedX, 820 + (index % 2 === 0 ? -44 : 44));
-              return (
-                <mesh key={`garden-bed-${index}`} position={[wx, 0.03, wz]} castShadow receiveShadow>
-                  <boxGeometry args={[0.58, 0.06, 0.18]} />
-                  <meshStandardMaterial color="#5d4037" roughness={0.84} metalness={0.06} />
-                </mesh>
-              );
-            })}
+          {[200, 280, 360, 440, 520].map((bedX, index) => {
+            const [wx, , wz] = toWorld(bedX, 820 + (index % 2 === 0 ? -44 : 44));
+            return (
+              <mesh key={`garden-bed-${index}`} position={[wx, 0.03, wz]} castShadow receiveShadow>
+                <boxGeometry args={[0.58, 0.06, 0.18]} />
+                <meshStandardMaterial color="#5d4037" roughness={0.84} metalness={0.06} />
+              </mesh>
+            );
+          })}
 
-          {Array.from({ length: 8 })
-            .map((_, index) => {
-              const bedX = 330 + index * 170;
-              if (bedX >= 580 && bedX <= 1220) return null;
-              const [wx, , wz] = toWorld(bedX, 820 + (index % 2 === 0 ? -44 : 44));
-              return (
-                <PlanterFoliage
-                  key={`garden-bed-top-${index}`}
-                  position={[wx, 0.09, wz]}
-                  spread={1.1}
-                />
-              );
-            })}
+          {[200, 280, 360, 440, 520].map((bedX, index) => {
+            const [wx, , wz] = toWorld(bedX, 820 + (index % 2 === 0 ? -44 : 44));
+            return (
+              <PlanterFoliage
+                key={`garden-bed-top-${index}`}
+                position={[wx, 0.09, wz]}
+                spread={1.1}
+              />
+            );
+          })}
 
           {Array.from({ length: 6 })
             .map((_, index) => {
               const lightX = 420 + index * 190;
               if (lightX >= 580 && lightX <= 1220) return null;
+              if (lightX >= 1300 && lightX <= 1750) return null;
               const [wx, , wz] = toWorld(lightX, 900);
               return (
                 <group key={`garden-light-${index}`} position={[wx, 0, wz]}>
@@ -523,8 +542,8 @@ export const FloorAndWalls = memo(function FloorAndWalls({
             );
           })}
 
-          {Array.from({ length: 4 }).map((_, index) => {
-            const [wx, , wz] = toWorld(250 + index * 430, 955);
+          {[220, 540, 860, 1180].map((planterX, index) => {
+            const [wx, , wz] = toWorld(planterX, 955);
             return (
               <mesh key={`city-planter-${index}`} position={[wx, 0.08, wz]} castShadow>
                 <boxGeometry args={[0.46, 0.14, 0.26]} />
@@ -533,8 +552,8 @@ export const FloorAndWalls = memo(function FloorAndWalls({
             );
           })}
 
-          {Array.from({ length: 4 }).map((_, index) => {
-            const [wx, , wz] = toWorld(250 + index * 430, 955);
+          {[220, 540, 860, 1180].map((planterX, index) => {
+            const [wx, , wz] = toWorld(planterX, 955);
             return (
               <PlanterFoliage
                 key={`city-planter-top-${index}`}
@@ -546,44 +565,71 @@ export const FloorAndWalls = memo(function FloorAndWalls({
         </>
       ) : null}
 
-      {gymZoneFloorWidth > 0 && roomZoneFloorHeight > 0 ? (
-        <>
-          <mesh
-            position={[gymZoneCenterX, 0.002, roomZoneCenterZ]}
-            rotation={[-Math.PI / 2, 0, 0]}
-            receiveShadow
-          >
-            <planeGeometry args={[gymZoneFloorWidth, roomZoneFloorHeight]} />
-            <meshStandardMaterial
-              color="#40464f"
-              map={gymRubber.map}
-              roughnessMap={gymRubber.roughnessMap}
-              normalMap={gymRubber.normalMap}
-              normalScale={[0.5, 0.5]}
-              roughness={0.98}
-              metalness={0.02}
-            />
-          </mesh>
-          {showRemoteOffice ? (
-            <mesh
-              position={[gymZoneCenterX, 0.002, roomZoneCenterZ + remoteOfficeOffsetZ]}
-              rotation={[-Math.PI / 2, 0, 0]}
-              receiveShadow
-            >
-              <planeGeometry args={[gymZoneFloorWidth, roomZoneFloorHeight]} />
-              <meshStandardMaterial
-                color="#40464f"
-                map={gymRubber.map}
-                roughnessMap={gymRubber.roughnessMap}
-                normalMap={gymRubber.normalMap}
-                normalScale={[0.5, 0.5]}
-                roughness={0.98}
-                metalness={0.02}
-              />
-            </mesh>
-          ) : null}
-        </>
-      ) : null}
+      {/* Bedroom Annex outdoor foundation floor */}
+      <mesh
+        position={[bedroomDeckCenterX, 0.002, bedroomDeckCenterZ]}
+        rotation={[-Math.PI / 2, 0, 0]}
+        receiveShadow
+      >
+        <planeGeometry args={[bedroomDeckWidth + 0.12, bedroomDeckHeight + 0.12]} />
+        <meshStandardMaterial
+          color="#4e3629"
+          roughness={0.88}
+          metalness={0.06}
+        />
+      </mesh>
+      <mesh
+        position={[bedroomDeckCenterX, 0.0035, bedroomDeckCenterZ]}
+        rotation={[-Math.PI / 2, 0, 0]}
+        receiveShadow
+      >
+        <planeGeometry args={[bedroomDeckWidth, bedroomDeckHeight]} />
+        <meshPhysicalMaterial
+          color="#d4aa7d"
+          map={bedroomDeckWood.map}
+          roughnessMap={bedroomDeckWood.roughnessMap}
+          normalMap={bedroomDeckWood.normalMap}
+          normalScale={[0.5, 0.5]}
+          clearcoat={0.15}
+          clearcoatRoughness={0.65}
+          roughness={0.85}
+          metalness={0.02}
+        />
+      </mesh>
+
+      {/* Walkway from HQ south doorway heading east towards Bedroom Annex door */}
+      <mesh
+        position={[walkwaySouthCenterX, 0.0042, walkwaySouthCenterZ]}
+        rotation={[-Math.PI / 2, 0, 0]}
+        receiveShadow
+      >
+        <planeGeometry args={[walkwaySouthWidth, walkwaySouthLength]} />
+        <meshStandardMaterial
+          color="#d8c5a6"
+          map={walkwayConcrete.map}
+          roughnessMap={walkwayConcrete.roughnessMap}
+          normalMap={walkwayConcrete.normalMap}
+          normalScale={[0.5, 0.5]}
+          roughness={0.92}
+          metalness={0.02}
+        />
+      </mesh>
+      <mesh
+        position={[walkwayEastCenterX, 0.0042, walkwayEastCenterZ]}
+        rotation={[-Math.PI / 2, 0, 0]}
+        receiveShadow
+      >
+        <planeGeometry args={[walkwayEastLength, walkwayEastWidth]} />
+        <meshStandardMaterial
+          color="#d8c5a6"
+          map={walkwayConcrete.map}
+          roughnessMap={walkwayConcrete.roughnessMap}
+          normalMap={walkwayConcrete.normalMap}
+          normalScale={[0.5, 0.5]}
+          roughness={0.92}
+          metalness={0.02}
+        />
+      </mesh>
 
       {qaZoneFloorWidth > 0 && roomZoneFloorHeight > 0 ? (
         <>

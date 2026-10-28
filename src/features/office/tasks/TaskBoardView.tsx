@@ -5,7 +5,7 @@
 // the agent's fingerprints: source platform, model, skills used or learned,
 // subagents spawned, and cron schedules.
 
-import type { DragEvent, KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useMemo, type DragEvent, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import {
   AlarmClock,
   BrainCircuit,
@@ -22,6 +22,8 @@ import {
 import type { AgentState } from "@/features/agents/state/store";
 import type { CronJobSummary } from "@/lib/cron/types";
 import type { TaskBoardCard, TaskBoardStatus } from "@/features/office/tasks/types";
+import { isAgentInDisabledTeam, useOptionalTeamStore } from "@/features/teams/store";
+import type { Team } from "@/features/teams/types";
 
 const STATUS_ORDER: TaskBoardStatus[] = [
   "inbox",
@@ -163,6 +165,7 @@ export function TaskBoardView({
   title,
   subtitle,
   agents,
+  teams: propsTeams,
   cardsByStatus,
   selectedCard,
   activeRuns,
@@ -180,6 +183,7 @@ export function TaskBoardView({
   title: string;
   subtitle: string;
   agents: AgentState[];
+  teams?: Team[];
   cardsByStatus: Record<TaskBoardStatus, TaskBoardCard[]>;
   selectedCard: TaskBoardCard | null;
   activeRuns: Array<{ runId: string; agentId: string; label: string }>;
@@ -207,6 +211,14 @@ export function TaskBoardView({
   onDeleteCard: (cardId: string) => void;
   onRefreshCronJobs: () => void;
 }) {
+  const teamStore = useOptionalTeamStore();
+  const teams = propsTeams ?? teamStore?.state.teams ?? [];
+
+  const assignableAgents = useMemo(() => {
+    if (!teams || teams.length === 0) return agents;
+    return agents.filter((agent) => !isAgentInDisabledTeam(teams, agent.teamId));
+  }, [agents, teams]);
+
   const workingCount = cardsByStatus.working.length;
   const attentionCount = cardsByStatus.needs_attention.length;
   const learnedCount = STATUS_ORDER.reduce(
@@ -525,7 +537,7 @@ export function TaskBoardView({
                   className="rounded border border-white/10 bg-black/40 px-3 py-2 text-sm text-white outline-none"
                 >
                   <option value="">Unassigned</option>
-                  {agents.map((agent) => (
+                  {assignableAgents.map((agent) => (
                     <option key={agent.agentId} value={agent.agentId}>
                       {agent.name || agent.agentId}
                     </option>

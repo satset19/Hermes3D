@@ -9,7 +9,8 @@ import {
   useState,
 } from "react";
 import { useRouter } from "next/navigation";
-import { MessageSquare, ChevronDown, ChevronLeft, ChevronRight, Mic } from "lucide-react";
+import Link from "next/link";
+import { MessageSquare, ChevronDown, ChevronLeft, ChevronRight, Mic, Users } from "lucide-react";
 import { RetroOffice3D } from "@/features/retro-office/RetroOffice3D";
 import type { OfficeAgent } from "@/features/retro-office/core/types";
 import { PixelOffice2D } from "@/features/pixel-office/PixelOffice2D";
@@ -21,6 +22,7 @@ import {
 import { RunningAvatarLoader } from "@/features/agents/components/RunningAvatarLoader";
 import { GatewayConnectScreen } from "@/features/agents/components/GatewayConnectScreen";
 import { useAgentStore, type AgentState } from "@/features/agents/state/store";
+import { mergePendingLivePatch } from "@/features/agents/state/livePatchQueue";
 import {
   buildAgentMainSessionKey,
   type EventFrame,
@@ -45,6 +47,8 @@ import {
   executeStudioBootstrapLoadCommands,
 } from "@/features/agents/operations/studioBootstrapOperation";
 import { isGatewayDisconnectLikeError } from "@/lib/gateway/GatewayClient";
+import { isAgentInDisabledTeam, useOptionalTeamStore } from "@/features/teams/store";
+import type { Team } from "@/features/teams/types";
 import { createGatewayRuntimeEventHandler } from "@/features/agents/state/gatewayRuntimeEventHandler";
 import { shouldKeepLiveRun, toInferredRunId } from "@/features/agents/state/inferredRunId";
 import {
@@ -64,6 +68,10 @@ import {
 } from "@/lib/text/message-extract";
 import { resolveOfficeIntentSnapshot } from "@/lib/office/deskDirectives";
 import { AgentChatPanel } from "@/features/agents/components/AgentChatPanel";
+import type { ExecApprovalDecision, PendingExecApproval } from "@/features/agents/approvals/types";
+import { resolveExecApprovalEventEffects } from "@/features/agents/approvals/execApprovalLifecycleWorkflow";
+import { resolveExecApprovalViaStudio } from "@/features/agents/approvals/execApprovalResolveOperation";
+import { AgentApprovalPopupStack } from "@/features/office/components/AgentApprovalPopup";
 import {
   RemoteAgentChatPanel,
   type RemoteAgentChatMessage,
@@ -564,6 +572,7 @@ const mapAgentToOffice = (agent: AgentState): OfficeAgent => {
       color: stringToColor(agent.agentId),
       item: getDeterministicItem(agent.agentId),
       avatarProfile: agent.avatarProfile ?? null,
+      teamId: agent.teamId ?? null,
     };
   }
   const isWorking = agent.status === "running" || Boolean(agent.runId);
@@ -575,6 +584,7 @@ const mapAgentToOffice = (agent: AgentState): OfficeAgent => {
     color: stringToColor(agent.agentId),
     item: getDeterministicItem(agent.agentId),
     avatarProfile: agent.avatarProfile ?? null,
+    teamId: agent.teamId ?? null,
   };
 };
 
@@ -666,12 +676,66 @@ type RemoteChatSessionState = {
   messages: RemoteAgentChatMessage[];
 };
 
-type ChatRosterEntry = {
+export type ChatRosterEntry = {
   id: string;
   name: string;
   kind: "local" | "remote";
   isRunning: boolean;
 };
+
+export function filterChatRosterEntries(
+  agents: AgentState[],
+  remoteAgents: OfficeAgent[],
+  teams: Team[],
+): ChatRosterEntry[] {
+  return [
+    ...agents
+      .filter((agent) => !isAgentInDisabledTeam(teams, agent.teamId))
+      .map((agent) => ({
+        id: agent.agentId,
+        name: agent.name || agent.agentId,
+        kind: "local" as const,
+        isRunning: agent.status === "running",
+      })),
+    ...remoteAgents
+      .filter((agent) => !isAgentInDisabledTeam(teams, agent.teamId))
+      .map((agent) => ({
+        id: agent.id,
+        name: agent.name || agent.id,
+        kind: "remote" as const,
+        isRunning: agent.status === "working",
+      })),
+  ];
+}
+
+export function resolveActiveChatAgentId(params: {
+  currentId: string | null;
+  agents: AgentState[];
+  remoteAgentIds?: string[];
+  teams: Team[];
+}): string | null {
+  const { currentId, agents, remoteAgentIds = [], teams } = params;
+  const isRemote = currentId ? remoteAgentIds.includes(currentId) : false;
+  const localAgent = currentId ? agents.find((a) => a.agentId === currentId) : null;
+
+  if (localAgent && !isAgentInDisabledTeam(teams, localAgent.teamId)) {
+    return currentId;
+  }
+  if (isRemote) {
+    return currentId;
+  }
+
+  const firstVisible = agents.find((a) => !isAgentInDisabledTeam(teams, a.teamId));
+  if (firstVisible) {
+    return firstVisible.agentId;
+  }
+
+  if (remoteAgentIds.length > 0) {
+    return remoteAgentIds[0];
+  }
+
+  return null;
+}
 
 const EMPTY_REMOTE_CHAT_SESSION: RemoteChatSessionState = {
   draft: "",
@@ -946,7 +1010,10 @@ export function OfficeScreen({
   const runtimeSupportsRunLifecycle = supportsCapability("runtime-agent-events");
   const { state, dispatch, hydrateAgents, setError, setLoading } =
     useAgentStore();
+  const teamStore = useOptionalTeamStore();
+  const hydrateTeams = teamStore?.hydrateTeams;
   const [agentsLoaded, setAgentsLoaded] = useState(false);
+  const [officeSceneInitialized, setOfficeSceneInitialized] = useState(false);
   const [didAttemptGatewayConnect, setDidAttemptGatewayConnect] = useState(false);
   const [showDelayedGatewayLoadingOverlay, setShowDelayedGatewayLoadingOverlay] =
     useState(false);
@@ -991,6 +1058,25 @@ export function OfficeScreen({
   const prevAssistantPreviewRef = useRef<
     Record<string, { ts: number; text: string }>
   >({});
+  const sessionMountTimeRef = useRef<number>(Date.now());
+  const [pendingExecApprovalsByAgentId, setPendingExecApprovalsByAgentId] = useState<
+    Record<string, PendingExecApproval[]>
+  >({});
+  const [unscopedPendingExecApprovals, setUnscopedPendingExecApprovals] = useState<
+    PendingExecApproval[]
+  >([]);
+  const pendingExecApprovalsByAgentIdRef = useRef(pendingExecApprovalsByAgentId);
+  const unscopedPendingExecApprovalsRef = useRef(unscopedPendingExecApprovals);
+
+  useEffect(() => {
+    pendingExecApprovalsByAgentIdRef.current = pendingExecApprovalsByAgentId;
+  }, [pendingExecApprovalsByAgentId]);
+
+  useEffect(() => {
+    unscopedPendingExecApprovalsRef.current = unscopedPendingExecApprovals;
+  }, [unscopedPendingExecApprovals]);
+  const feedInitializedRef = useRef(false);
+  const prevStatusRef = useRef(status);
   const [runCountByAgentId, setRunCountByAgentId] = useState<
     Record<string, number>
   >({});
@@ -1017,6 +1103,31 @@ export function OfficeScreen({
   const officeTriggerStateRef = useRef(officeTriggerState);
   const historyInFlightRef = useRef<Set<string>>(new Set());
   const lastTransportHistoryRefreshKeyRef = useRef<Record<string, string>>({});
+  const patchBatchRef = useRef<Map<string, Partial<AgentState>>>(new Map());
+  const rafIdRef = useRef<number | null>(null);
+  const prevOfficeAgentsRef = useRef<OfficeAgent[]>([]);
+
+  const flushPatches = useCallback(() => {
+    rafIdRef.current = null;
+    if (patchBatchRef.current.size === 0) return;
+    const pending = new Map(patchBatchRef.current);
+    patchBatchRef.current.clear();
+    pending.forEach((patch, agentId) => {
+      dispatch({ type: "updateAgent", agentId, patch });
+    });
+  }, [dispatch]);
+
+  const queueLivePatch = useCallback(
+    (agentId: string, patch: Partial<AgentState>) => {
+      const existing = patchBatchRef.current.get(agentId);
+      patchBatchRef.current.set(agentId, mergePendingLivePatch(existing, patch));
+      if (rafIdRef.current === null) {
+        rafIdRef.current = requestAnimationFrame(flushPatches);
+      }
+    },
+    [flushPatches],
+  );
+
   const [chatOpen, setChatOpen] = useState(false);
   const chatModalRef = useRef<HTMLDivElement>(null);
   const chatLauncherRef = useRef<HTMLButtonElement>(null);
@@ -1278,6 +1389,11 @@ export function OfficeScreen({
       agentId: string,
       options?: { openChat?: boolean; persistFloorId?: FloorId; selectStore?: boolean },
     ) => {
+      const teams = teamStore?.state.teams ?? [];
+      const agent = stateRef.current.agents.find((a) => a.agentId === agentId);
+      if (agent && isAgentInDisabledTeam(teams, agent.teamId)) {
+        return;
+      }
       setSelectedChatAgentId(agentId);
       if (options?.openChat !== false) {
         setChatOpen(true);
@@ -1286,17 +1402,24 @@ export function OfficeScreen({
         dispatch({ type: "selectAgent", agentId });
       }
     },
-    [dispatch],
+    [dispatch, teamStore?.state.teams],
   );
   const focusChatTarget = useCallback(
     (agentId: string) => {
+      const teams = teamStore?.state.teams ?? [];
+      if (!isRemoteOfficeAgentId(agentId)) {
+        const agent = stateRef.current.agents.find((a) => a.agentId === agentId);
+        if (agent && isAgentInDisabledTeam(teams, agent.teamId)) {
+          return;
+        }
+      }
       setSelectedChatAgentId(agentId);
       setChatOpen(true);
       if (!isRemoteOfficeAgentId(agentId)) {
         dispatch({ type: "selectAgent", agentId });
       }
     },
-    [dispatch],
+    [dispatch, teamStore?.state.teams],
   );
   const openAgentEditor = useCallback(
     (agentId: string, initialSection: AgentEditorSection = "avatar") => {
@@ -1538,6 +1661,7 @@ export function OfficeScreen({
             gatewayConfigSnapshot.current = val;
           },
           hydrateAgents,
+          hydrateTeams,
           dispatchUpdateAgent: (agentId, patch) => {
             dispatch({ type: "updateAgent", agentId, patch });
           },
@@ -2517,9 +2641,6 @@ export function OfficeScreen({
         if (selectedAdapterType === "demo") {
           hydrateAgents([createDemoMainAgentSeed()], MAIN_AGENT_ID);
           setAgentsLoaded(true);
-        } else {
-          setAgentsLoaded(false);
-          hydrateAgents([]);
         }
       }
       setFeedEvents([]);
@@ -2528,8 +2649,29 @@ export function OfficeScreen({
       setLastSeenByAgentId({});
       prevAssistantPreviewRef.current = {};
       lastGatewayActivityAtRef.current = 0;
+      sessionMountTimeRef.current = Date.now();
+      feedInitializedRef.current = false;
     }
   }, [hydrateAgents, selectedAdapterType, setLoading, status]);
+
+  useEffect(() => {
+    if (prevStatusRef.current !== "connected" && status === "connected") {
+      sessionMountTimeRef.current = Date.now();
+      feedInitializedRef.current = false;
+      for (const agent of stateRef.current.agents) {
+        const previewText = normalizeOfficeFeedText(
+          agent.latestPreview ?? agent.lastResult,
+        );
+        const previewTs = agent.lastAssistantMessageAt ?? 0;
+        if (!previewText || previewTs <= 0) continue;
+        prevAssistantPreviewRef.current[agent.agentId] = {
+          ts: previewTs,
+          text: previewText,
+        };
+      }
+    }
+    prevStatusRef.current = status;
+  }, [status]);
 
   useEffect(() => {
     if (selectedAdapterType !== "demo") return;
@@ -2540,10 +2682,60 @@ export function OfficeScreen({
   }, [hydrateAgents, selectedAdapterType, state.agents.length, status]);
 
   useEffect(() => {
-    if (!agentsLoaded) return;
+    if (!agentsLoaded) {
+      for (const agent of state.agents) {
+        const previewText = normalizeOfficeFeedText(
+          agent.latestPreview ?? agent.lastResult,
+        );
+        const previewTs = agent.lastAssistantMessageAt ?? 0;
+        if (!previewText || previewTs <= 0) continue;
+        prevAssistantPreviewRef.current[agent.agentId] = {
+          ts: previewTs,
+          text: previewText,
+        };
+      }
+      return;
+    }
+
+    if (
+      typeof document !== "undefined" &&
+      document.visibilityState === "hidden"
+    ) {
+      for (const agent of state.agents) {
+        const previewText = normalizeOfficeFeedText(
+          agent.latestPreview ?? agent.lastResult,
+        );
+        const previewTs = agent.lastAssistantMessageAt ?? 0;
+        if (!previewText || previewTs <= 0) continue;
+        prevAssistantPreviewRef.current[agent.agentId] = {
+          ts: previewTs,
+          text: previewText,
+        };
+      }
+      return;
+    }
+
+    if (!feedInitializedRef.current) {
+      for (const agent of state.agents) {
+        const previewText = normalizeOfficeFeedText(
+          agent.latestPreview ?? agent.lastResult,
+        );
+        const previewTs = agent.lastAssistantMessageAt ?? 0;
+        if (!previewText || previewTs <= 0) continue;
+        prevAssistantPreviewRef.current[agent.agentId] = {
+          ts: previewTs,
+          text: previewText,
+        };
+      }
+      if (state.agents.length > 0) {
+        feedInitializedRef.current = true;
+      }
+      return;
+    }
+
     const previousByAgentId = prevAssistantPreviewRef.current;
     const nextByAgentId: Record<string, { ts: number; text: string }> = {};
-    let initialized = Object.keys(previousByAgentId).length > 0;
+    const now = Date.now();
 
     for (const agent of state.agents) {
       const previewText = normalizeOfficeFeedText(
@@ -2552,11 +2744,16 @@ export function OfficeScreen({
       const previewTs = agent.lastAssistantMessageAt ?? 0;
       if (!previewText || previewTs <= 0) continue;
       nextByAgentId[agent.agentId] = { ts: previewTs, text: previewText };
+
+      if (previewTs <= sessionMountTimeRef.current || now - previewTs > 60_000) {
+        continue;
+      }
+
       const previous = previousByAgentId[agent.agentId];
       if (!previous) continue;
-      initialized = true;
       if (previous.ts === previewTs && previous.text === previewText) continue;
       if (previewTs < previous.ts) continue;
+
       setFeedEvents((prev) =>
         [
           {
@@ -2571,11 +2768,10 @@ export function OfficeScreen({
       );
     }
 
-    if (!initialized) {
-      prevAssistantPreviewRef.current = nextByAgentId;
-      return;
-    }
-    prevAssistantPreviewRef.current = nextByAgentId;
+    prevAssistantPreviewRef.current = {
+      ...previousByAgentId,
+      ...nextByAgentId,
+    };
   }, [agentsLoaded, state.agents]);
 
   useEffect(() => {
@@ -2587,7 +2783,7 @@ export function OfficeScreen({
         dispatch(action as never);
       },
       queueLivePatch: (agentId, patch) => {
-        dispatch({ type: "updateAgent", agentId, patch });
+        queueLivePatch(agentId, patch);
         if ("status" in patch || "runId" in patch) {
           const agent = stateRef.current.agents.find(
             (entry) => entry.agentId === agentId,
@@ -2621,7 +2817,9 @@ export function OfficeScreen({
           }
         }
       },
-      clearPendingLivePatch: () => {},
+      clearPendingLivePatch: (agentId) => {
+        patchBatchRef.current.delete(agentId);
+      },
       loadSummarySnapshot: async () => {
         await loadAgents({
           minIntervalMs: 3_000,
@@ -2681,6 +2879,25 @@ export function OfficeScreen({
       ) {
         return;
       }
+      if (event.event === "teams") {
+        const payload = event.payload as { teams?: Team[] } | undefined;
+        if (Array.isArray(payload?.teams)) {
+          hydrateTeams?.(payload.teams);
+        }
+      }
+      if (event.event === "chat.cleared") {
+        const payload = event.payload as { sessionKey?: string } | undefined;
+        const clearedKey = payload?.sessionKey;
+        if (clearedKey) {
+          const matchedAgent = stateRef.current.agents.find(
+            (a) => a.sessionKey === clearedKey || `agent:${a.agentId}:main` === clearedKey
+          );
+          if (matchedAgent) {
+            dispatch({ type: "clearChat", agentId: matchedAgent.agentId });
+          }
+        }
+        return;
+      }
       if (event.event === "office.speech") {
         // A turn driven from another client (desktop app, TUI, CLI). It has no
         // run of its own, so it bypasses the chat/run machinery and lands
@@ -2692,6 +2909,46 @@ export function OfficeScreen({
           setFeedEvents((previous) => [speech, ...previous].slice(0, 6));
         }
         return;
+      }
+      const approvalEffects = resolveExecApprovalEventEffects({
+        event,
+        agents: stateRef.current.agents,
+      });
+      if (approvalEffects) {
+        if (
+          approvalEffects.scopedUpserts.length > 0 ||
+          approvalEffects.unscopedUpserts.length > 0 ||
+          approvalEffects.removals.length > 0
+        ) {
+          setPendingExecApprovalsByAgentId((current) => {
+            const next = { ...current };
+            for (const { agentId, approval } of approvalEffects.scopedUpserts) {
+              const existing = next[agentId] ?? [];
+              next[agentId] = [...existing.filter((a) => a.id !== approval.id), approval];
+            }
+            for (const removalId of approvalEffects.removals) {
+              for (const [agentId, list] of Object.entries(next)) {
+                const filtered = list.filter((a) => a.id !== removalId);
+                if (filtered.length === 0) {
+                  delete next[agentId];
+                } else {
+                  next[agentId] = filtered;
+                }
+              }
+            }
+            return next;
+          });
+          setUnscopedPendingExecApprovals((current) => {
+            let next = [...current];
+            for (const approval of approvalEffects.unscopedUpserts) {
+              next = [...next.filter((a) => a.id !== approval.id), approval];
+            }
+            for (const removalId of approvalEffects.removals) {
+              next = next.filter((a) => a.id !== removalId);
+            }
+            return next;
+          });
+        }
       }
       taskBoardEventHandlerRef.current(event);
       runtimeHandler.handleEvent(event);
@@ -2706,6 +2963,11 @@ export function OfficeScreen({
     });
 
     return () => {
+      if (rafIdRef.current !== null) {
+        cancelAnimationFrame(rafIdRef.current);
+        rafIdRef.current = null;
+      }
+      flushPatches();
       unsubscribeEvent();
       unsubscribeGap();
       runtimeHandler.dispose();
@@ -2715,7 +2977,9 @@ export function OfficeScreen({
     client,
     debugEnabled,
     dispatch,
+    flushPatches,
     loadAgents,
+    queueLivePatch,
     refreshRecentTransportSessionHistory,
     requestAgentHistoryRefresh,
     status,
@@ -2738,9 +3002,52 @@ export function OfficeScreen({
   }, [agentsLoaded, loadAgents, status]);
 
   useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        sessionMountTimeRef.current = Math.max(
+          sessionMountTimeRef.current,
+          Date.now(),
+        );
+        feedInitializedRef.current = false;
+        for (const agent of stateRef.current.agents) {
+          const previewText = normalizeOfficeFeedText(
+            agent.latestPreview ?? agent.lastResult,
+          );
+          const previewTs = agent.lastAssistantMessageAt ?? 0;
+          if (!previewText || previewTs <= 0) continue;
+          prevAssistantPreviewRef.current[agent.agentId] = {
+            ts: previewTs,
+            text: previewText,
+          };
+        }
+      }
+    };
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, []);
+
+  useEffect(() => {
     if (status !== "connected" || !agentsLoaded) return;
     const handleFocus = () => {
       if (document.visibilityState !== "visible") return;
+      sessionMountTimeRef.current = Math.max(
+        sessionMountTimeRef.current,
+        Date.now(),
+      );
+      feedInitializedRef.current = false;
+      for (const agent of stateRef.current.agents) {
+        const previewText = normalizeOfficeFeedText(
+          agent.latestPreview ?? agent.lastResult,
+        );
+        const previewTs = agent.lastAssistantMessageAt ?? 0;
+        if (!previewText || previewTs <= 0) continue;
+        prevAssistantPreviewRef.current[agent.agentId] = {
+          ts: previewTs,
+          text: previewText,
+        };
+      }
       void loadAgents({
         minIntervalMs: 15_000,
         settingsMaxAgeMs: 30_000,
@@ -2835,16 +3142,36 @@ export function OfficeScreen({
     };
   }, [status, provider, runtimeSupportsModels]);
 
-  useEffect(() => {
-    if (chatOpen && !selectedChatAgentId && state.agents.length > 0) {
-      setSelectedChatAgentId(state.agents[0].agentId);
-    }
-  }, [chatOpen, selectedChatAgentId, state.agents]);
-
   const remoteChatAgentIds = useMemo(
     () => (remoteOfficeSnapshot?.agents ?? []).map((agent) => `remote:${agent.agentId}`),
     [remoteOfficeSnapshot],
   );
+
+  useEffect(() => {
+    if (chatOpen && !selectedChatAgentId && (state.agents.length > 0 || remoteChatAgentIds.length > 0)) {
+      const nextId = resolveActiveChatAgentId({
+        currentId: null,
+        agents: state.agents,
+        remoteAgentIds: remoteChatAgentIds,
+        teams: teamStore?.state.teams ?? [],
+      });
+      if (nextId) {
+        setSelectedChatAgentId(nextId);
+        dispatch({ type: "selectAgent", agentId: nextId });
+      }
+    }
+  }, [chatOpen, dispatch, remoteChatAgentIds, selectedChatAgentId, state.agents, teamStore?.state.teams]);
+
+  useEffect(() => {
+    if (!chatOpen || !selectedChatAgentId || status !== "connected") return;
+    if (isRemoteOfficeAgentId(selectedChatAgentId)) return;
+    const targetAgent = state.agents.find((a) => a.agentId === selectedChatAgentId);
+    if (!targetAgent) return;
+    void requestAgentHistoryRefresh({
+      agentId: selectedChatAgentId,
+      reason: "run-start-no-chat",
+    });
+  }, [chatOpen, selectedChatAgentId, status, requestAgentHistoryRefresh]);
 
   const chatController = useChatInteractionController({
     client: provider,
@@ -2862,8 +3189,11 @@ export function OfficeScreen({
   });
 
   const focusedChatAgent = selectedChatAgentId
-    ? (state.agents.find((agent) => agent.agentId === selectedChatAgentId) ??
-      null)
+    ? (state.agents.find(
+        (agent) =>
+          agent.agentId === selectedChatAgentId &&
+          !isAgentInDisabledTeam(teamStore?.state.teams ?? [], agent.teamId),
+      ) ?? null)
     : null;
   const selectedLocalChatAgentId = focusedChatAgent?.agentId ?? null;
   const agentEditorAgent = agentEditorAgentId
@@ -2874,10 +3204,25 @@ export function OfficeScreen({
 
   useEffect(() => {
     if (!selectedChatAgentId) return;
-    if (state.agents.some((agent) => agent.agentId === selectedChatAgentId)) return;
-    if (remoteChatAgentIds.includes(selectedChatAgentId)) return;
-    setSelectedChatAgentId(null);
-  }, [remoteChatAgentIds, selectedChatAgentId, state.agents]);
+    const teams = teamStore?.state.teams ?? [];
+    const localAgent = state.agents.find((agent) => agent.agentId === selectedChatAgentId);
+    const isRemote = remoteChatAgentIds.includes(selectedChatAgentId);
+    if (!localAgent && !isRemote) {
+      setSelectedChatAgentId(null);
+      dispatch({ type: "selectAgent", agentId: null });
+      return;
+    }
+    if (localAgent && isAgentInDisabledTeam(teams, localAgent.teamId)) {
+      const nextId = resolveActiveChatAgentId({
+        currentId: null,
+        agents: state.agents,
+        remoteAgentIds: remoteChatAgentIds,
+        teams,
+      });
+      setSelectedChatAgentId(nextId);
+      dispatch({ type: "selectAgent", agentId: nextId });
+    }
+  }, [dispatch, remoteChatAgentIds, selectedChatAgentId, state.agents, teamStore?.state.teams]);
 
   useEffect(() => {
     if (!agentEditorAgentId) return;
@@ -2950,13 +3295,12 @@ export function OfficeScreen({
     enabled: runtimeSupportsSkills,
     agents: state.agents,
   });
-  const animationNowMs = Date.now();
   const officeAnimationState = useMemo(() => {
     const base = buildOfficeAnimationState({
       state: officeTriggerState,
       agents: state.agents,
       marketplaceGymHoldByAgentId,
-      nowMs: animationNowMs,
+      nowMs: Date.now(),
     });
     const skillTriggerHoldMaps = buildOfficeSkillTriggerHoldMaps(
       skillTriggers.movementTargetByAgentId,
@@ -2973,10 +3317,6 @@ export function OfficeScreen({
         ...base.githubHoldByAgentId,
         ...skillTriggerHoldMaps.githubHoldByAgentId,
       },
-      gymHoldByAgentId: {
-        ...base.gymHoldByAgentId,
-        ...skillTriggerHoldMaps.gymHoldByAgentId,
-      },
       jukeboxHoldByAgentId: {
         ...base.jukeboxHoldByAgentId,
         ...skillTriggerHoldMaps.jukeboxHoldByAgentId,
@@ -2987,11 +3327,9 @@ export function OfficeScreen({
       },
       skillGymHoldByAgentId: {
         ...base.skillGymHoldByAgentId,
-        ...skillTriggerHoldMaps.skillGymHoldByAgentId,
       },
     };
   }, [
-    animationNowMs,
     danceUntilByAgentId,
     marketplaceGymHoldByAgentId,
     officeTriggerState,
@@ -3407,20 +3745,20 @@ export function OfficeScreen({
   );
 
   const gymHoldByAgentId = useMemo(() => {
+    const now = Date.now();
     const next: Record<string, boolean> = {};
     for (const agent of state.agents) {
       const agentId = agent.agentId;
       if (
         immediateGymHoldByAgentId[agentId] ||
-        (manualGymUntilByAgentId[agentId] ?? 0) > animationNowMs ||
-        (gymCooldownUntilByAgentId[agentId] ?? 0) > animationNowMs
+        (manualGymUntilByAgentId[agentId] ?? 0) > now ||
+        (gymCooldownUntilByAgentId[agentId] ?? 0) > now
       ) {
         next[agentId] = true;
       }
     }
     return next;
   }, [
-    animationNowMs,
     gymCooldownUntilByAgentId,
     immediateGymHoldByAgentId,
     manualGymUntilByAgentId,
@@ -3713,7 +4051,7 @@ export function OfficeScreen({
           createHermesLogEntry({
             eventName: "office-intent",
             eventKind: "derived",
-            summary: `agent=${agentId} gym=${intentSnapshot.gym?.source ?? "-"} qa=${intentSnapshot.qa ?? "-"} github=${intentSnapshot.github ?? "-"} desk=${intentSnapshot.desk ?? "-"} text=${intentSnapshot.text?.phase ?? "-"}`,
+            summary: `agent=${agentId} qa=${intentSnapshot.qa ?? "-"} github=${intentSnapshot.github ?? "-"} desk=${intentSnapshot.desk ?? "-"} text=${intentSnapshot.text?.phase ?? "-"}`,
             payload: {
               agentId,
               message: trimmed,
@@ -3729,7 +4067,6 @@ export function OfficeScreen({
       const hasImmediateOfficeTrigger = Boolean(
         intentSnapshot.desk ||
           intentSnapshot.github ||
-          intentSnapshot.gym ||
           intentSnapshot.qa ||
           intentSnapshot.standup ||
           intentSnapshot.text,
@@ -3740,7 +4077,6 @@ export function OfficeScreen({
         !intentSnapshot.text &&
         !intentSnapshot.desk &&
         !intentSnapshot.github &&
-        !intentSnapshot.gym &&
         !intentSnapshot.qa &&
         !intentSnapshot.standup;
       const isTextMessageFollowUp =
@@ -3749,7 +4085,6 @@ export function OfficeScreen({
         !intentSnapshot.text &&
         !intentSnapshot.desk &&
         !intentSnapshot.github &&
-        !intentSnapshot.gym &&
         !intentSnapshot.qa &&
         !intentSnapshot.standup;
 
@@ -3917,6 +4252,45 @@ export function OfficeScreen({
     [focusedChatAgent, sendVoicePayloadToAgent],
   );
 
+  const handleResolveExecApproval = useCallback(
+    async (approvalId: string, decision: ExecApprovalDecision) => {
+      await resolveExecApprovalViaStudio({
+        approvalId,
+        decision,
+        client: provider,
+        getAgents: () => stateRef.current.agents,
+        getLatestAgent: (id) => stateRef.current.agents.find((a) => a.agentId === id) ?? null,
+        getPendingState: () => ({
+          approvalsByAgentId: pendingExecApprovalsByAgentIdRef.current,
+          unscopedApprovals: unscopedPendingExecApprovalsRef.current,
+        }),
+        setPendingExecApprovalsByAgentId,
+        setUnscopedPendingExecApprovals,
+        requestHistoryRefresh: async () => {},
+        isDisconnectLikeError: isGatewayDisconnectLikeError,
+      });
+    },
+    [provider],
+  );
+
+  const focusedPendingExecApprovals = useMemo(() => {
+    if (!focusedChatAgent) return [];
+    return pendingExecApprovalsByAgentId[focusedChatAgent.agentId] ?? [];
+  }, [focusedChatAgent, pendingExecApprovalsByAgentId]);
+
+  useEffect(() => {
+    for (const agent of state.agents) {
+      const hasPending = Boolean(pendingExecApprovalsByAgentId[agent.agentId]?.length);
+      if (agent.awaitingUserInput !== hasPending) {
+        dispatch({
+          type: "updateAgent",
+          agentId: agent.agentId,
+          patch: { awaitingUserInput: hasPending },
+        });
+      }
+    }
+  }, [dispatch, pendingExecApprovalsByAgentId, state.agents]);
+
   const {
     state: mainVoiceState,
     error: mainVoiceError,
@@ -4005,16 +4379,22 @@ export function OfficeScreen({
       const qaHeld = Boolean(qaHoldByAgentId[agent.agentId]);
       const smsBoothHeld = Boolean(smsBoothHoldByAgentId[agent.agentId]);
       const cached = officeAgentCacheRef.current.get(agent.agentId);
-      if (
+      const isAgentUnchanged =
         cached &&
-        cached.agent === agent &&
+        (cached.agent === agent ||
+          (cached.agent.status === agent.status &&
+            cached.agent.runId === agent.runId &&
+            cached.agent.name === agent.name &&
+            cached.agent.role === agent.role &&
+            cached.agent.avatarProfile === agent.avatarProfile &&
+            cached.agent.teamId === agent.teamId)) &&
         cached.latchedWorking === latchedWorking &&
         cached.deskHeld === deskHeld &&
         cached.gymHeld === gymHeld &&
         cached.phoneBoothHeld === phoneBoothHeld &&
         cached.qaHeld === qaHeld &&
-        cached.smsBoothHeld === smsBoothHeld
-      ) {
+        cached.smsBoothHeld === smsBoothHeld;
+      if (isAgentUnchanged) {
         nextCache.set(agent.agentId, cached);
         return cached.officeAgent;
       }
@@ -4057,6 +4437,13 @@ export function OfficeScreen({
       return officeAgent;
     });
     officeAgentCacheRef.current = nextCache;
+    if (
+      prevOfficeAgentsRef.current.length === nextOfficeAgents.length &&
+      prevOfficeAgentsRef.current.every((ag, i) => ag === nextOfficeAgents[i])
+    ) {
+      return prevOfficeAgentsRef.current;
+    }
+    prevOfficeAgentsRef.current = nextOfficeAgents;
     return nextOfficeAgents;
   }, [
     clockTick,
@@ -4124,21 +4511,13 @@ export function OfficeScreen({
     [remoteOfficeSnapshot]
   );
   const chatRosterEntries = useMemo<ChatRosterEntry[]>(
-    () => [
-      ...state.agents.map((agent) => ({
-        id: agent.agentId,
-        name: agent.name || agent.agentId,
-        kind: "local" as const,
-        isRunning: agent.status === "running",
-      })),
-      ...remoteOfficeAgents.map((agent) => ({
-        id: agent.id,
-        name: agent.name || agent.id,
-        kind: "remote" as const,
-        isRunning: agent.status === "working",
-      })),
-    ],
-    [remoteOfficeAgents, state.agents],
+    () =>
+      filterChatRosterEntries(
+        state.agents,
+        remoteOfficeAgents,
+        teamStore?.state.teams ?? [],
+      ),
+    [remoteOfficeAgents, state.agents, teamStore?.state.teams],
   );
   const focusedRemoteChatTarget = selectedChatAgentId
     ? (remoteOfficeAgents.find((agent) => agent.id === selectedChatAgentId) ?? null)
@@ -4147,8 +4526,12 @@ export function OfficeScreen({
     ? (remoteChatByAgentId[focusedRemoteChatTarget.id] ?? EMPTY_REMOTE_CHAT_SESSION)
     : null;
   const allVisibleAgents = useMemo(
-    () => [...officeAgents, ...remoteOfficeAgents],
-    [officeAgents, remoteOfficeAgents],
+    () =>
+      [...officeAgents, ...remoteOfficeAgents].filter(
+        (agent) =>
+          !isAgentInDisabledTeam(teamStore?.state.teams ?? [], agent.teamId),
+      ),
+    [officeAgents, remoteOfficeAgents, teamStore?.state.teams],
   );
   const remoteOfficeVisible =
     remoteOfficeEnabled &&
@@ -4321,7 +4704,9 @@ export function OfficeScreen({
   // API the bridge proxies as tasks.list), so the desk must not demand the
   // task-manager skill there — that skill is the legacy backend's task store.
   const kanbanDeskEnabled =
-    taskManagerReady || activeAdapterType === "hermes-agent";
+    taskManagerReady ||
+    activeAdapterType === "hermes-agent" ||
+    activeAdapterType === "hermes";
   const soundhermesReady = useMemo(
     () => (soundhermesSkill ? deriveSkillReadinessState(soundhermesSkill) === "ready" : false),
     [soundhermesSkill]
@@ -4418,9 +4803,28 @@ export function OfficeScreen({
   // the panel handles the disabled state itself.
 
   useEffect(() => {
+    if (agentsLoaded || status === "connected" || state.agents.length > 0) {
+      setOfficeSceneInitialized(true);
+    }
+  }, [agentsLoaded, state.agents.length, status]);
+
+  const hasLoadedAgents = agentsLoaded || state.agents.length > 0;
+  // Defer mounting the heavy office renderers (Three.js / Phaser) until a
+  // gateway connection exists, so users can pick 2D vs. 3D on the connect
+  // screen before either pipeline loads.
+  // Decoupled from momentary connection status drops so RetroOffice3D
+  // stays mounted during reconnect handshakes.
+  const officeSceneReady =
+    officeSceneInitialized ||
+    hasLoadedAgents ||
+    status === "connected";
+
+  const hasActiveOffice = hasLoadedAgents || officeSceneReady;
+
+  useEffect(() => {
     if (
       status === "connecting" &&
-      !agentsLoaded &&
+      !hasActiveOffice &&
       gatewayUrl.trim().length > 0 &&
       !shouldPromptForConnect
     ) {
@@ -4432,12 +4836,12 @@ export function OfficeScreen({
       };
     }
     setShowDelayedGatewayLoadingOverlay(false);
-  }, [agentsLoaded, gatewayUrl, shouldPromptForConnect, status]);
+  }, [gatewayUrl, hasActiveOffice, shouldPromptForConnect, status]);
 
   useEffect(() => {
     if (
       status === "disconnected" &&
-      !agentsLoaded &&
+      !hasActiveOffice &&
       didAttemptGatewayConnect &&
       !shouldPromptForConnect
     ) {
@@ -4449,10 +4853,10 @@ export function OfficeScreen({
       };
     }
     setShowDelayedGatewayConnectOverlay(false);
-  }, [agentsLoaded, didAttemptGatewayConnect, shouldPromptForConnect, status]);
+  }, [didAttemptGatewayConnect, hasActiveOffice, shouldPromptForConnect, status]);
 
   const showGatewayLoadingOverlay =
-    !agentsLoaded &&
+    !hasActiveOffice &&
     (!connectPromptReady ||
       (gatewayUrl.trim().length > 0 &&
         !shouldPromptForConnect &&
@@ -4461,12 +4865,8 @@ export function OfficeScreen({
   const showGatewayConnectOverlay =
     connectPromptReady &&
     status === "disconnected" &&
-    !agentsLoaded &&
+    !hasActiveOffice &&
     (shouldPromptForConnect || showDelayedGatewayConnectOverlay);
-  // Defer mounting the heavy office renderers (Three.js / Phaser) until a
-  // gateway connection exists, so users can pick 2D vs. 3D on the connect
-  // screen before either pipeline loads.
-  const officeSceneReady = agentsLoaded || status === "connected";
 
   const runningCount = state.agents.filter(
     (agent) =>
@@ -4609,6 +5009,7 @@ export function OfficeScreen({
           layoutPreset="office"
           officeCenterSignal={officeCameraCenterSignal}
           animationState={officeAnimationState}
+          activeChatAgentId={chatOpen ? selectedChatAgentId : null}
           deskAssignmentByDeskUid={deskAssignmentByDeskUid}
           githubReviewAgentId={githubReviewAgentId}
           qaTestingAgentId={qaTestingAgentId}
@@ -4977,6 +5378,18 @@ export function OfficeScreen({
           }
         />
       ) : null}
+
+      <AgentApprovalPopupStack
+        agents={state.agents}
+        approvalsByAgentId={pendingExecApprovalsByAgentId}
+        unscopedApprovals={unscopedPendingExecApprovals}
+        onResolve={(id, decision) => {
+          void handleResolveExecApproval(id, decision);
+        }}
+        onSelectAgent={(agentId) => {
+          handleOpenAgentChat(agentId);
+        }}
+      />
 
       <SkillsMarketplaceModal
         open={marketplaceOpen}
@@ -5354,12 +5767,48 @@ export function OfficeScreen({
                   stopBusy={
                     chatController.stopBusyAgentId === focusedChatAgent.agentId
                   }
-                  onLoadMoreHistory={() => {}}
+                  onLoadMoreHistory={() => {
+                    if (!focusedChatAgent) return;
+                    const currentLimit =
+                      focusedChatAgent.historyFetchLimit ??
+                      RUNTIME_SYNC_DEFAULT_HISTORY_LIMIT;
+                    void runHistorySyncOperation({
+                      client: provider,
+                      agentId: focusedChatAgent.agentId,
+                      requestedLimit: Math.min(
+                        currentLimit + 40,
+                        RUNTIME_SYNC_MAX_HISTORY_LIMIT,
+                      ),
+                      getAgent: (agentId) =>
+                        stateRef.current.agents.find(
+                          (entry) => entry.agentId === agentId,
+                        ) ?? null,
+                      inFlightSessionKeys: historyInFlightRef.current,
+                      requestId: randomUUID(),
+                      loadedAt: Date.now(),
+                      defaultLimit: RUNTIME_SYNC_DEFAULT_HISTORY_LIMIT,
+                      maxLimit: RUNTIME_SYNC_MAX_HISTORY_LIMIT,
+                      transcriptV2Enabled: TRANSCRIPT_V2_ENABLED,
+                    }).then((commands) => {
+                      executeHistorySyncCommands({
+                        commands,
+                        dispatch,
+                        logMetric: (metric, meta) =>
+                          logTranscriptDebugMetric(metric, meta),
+                        isDisconnectLikeError: isGatewayDisconnectLikeError,
+                        logError: (message, error) =>
+                          console.error(message, error),
+                      });
+                    });
+                  }}
                   onOpenSettings={() =>
                     openAgentEditor(focusedChatAgent.agentId, "IDENTITY.md")
                   }
                   onNewSession={() =>
                     chatController.handleNewSession(focusedChatAgent.agentId)
+                  }
+                  onClearChat={() =>
+                    chatController.handleClearChat(focusedChatAgent.agentId)
                   }
                   onModelChange={(value) =>
                     dispatch({
@@ -5404,6 +5853,10 @@ export function OfficeScreen({
                     openAgentEditor(focusedChatAgent.agentId, "avatar")
                   }
                   onVoiceSend={handleVoiceSend}
+                  pendingExecApprovals={focusedPendingExecApprovals}
+                  onResolveExecApproval={(id, decision) => {
+                    void handleResolveExecApproval(id, decision);
+                  }}
                 />
               ) : focusedRemoteChatTarget && focusedRemoteChatState ? (
                 <RemoteAgentChatPanel
@@ -5467,29 +5920,40 @@ export function OfficeScreen({
           </div>
         )}
 
-        <button
-          ref={chatLauncherRef}
-          type="button"
-          onClick={() => setChatOpen((prev) => !prev)}
-          className="flex items-center gap-1.5 rounded border border-amber-700/50 bg-[#0e0a04]/90 px-3 py-1.5 font-mono text-[11px] font-medium tracking-wider text-amber-500/80 shadow-lg backdrop-blur transition-colors hover:border-amber-600/70 hover:text-amber-400"
-        >
-          {chatOpen ? (
-            <>
-              <ChevronDown className="h-3.5 w-3.5" />
-              <span>HIDE CHAT</span>
-            </>
-          ) : (
-            <>
-              <MessageSquare className="h-3.5 w-3.5" />
-              <span>CHAT</span>
-              {runningCount > 0 ? (
-                <span className="rounded bg-amber-500/20 px-1 text-[10px] text-amber-400">
-                  {runningCount}
-                </span>
-              ) : null}
-            </>
-          )}
-        </button>
+        <div className="flex items-center gap-2">
+          <Link
+            href="/agents"
+            className="flex items-center gap-1.5 rounded border border-emerald-700/50 bg-[#0e0a04]/90 px-3 py-1.5 font-mono text-[11px] font-medium tracking-wider text-emerald-400/80 shadow-lg backdrop-blur transition-colors hover:border-emerald-600/70 hover:text-emerald-300"
+            aria-label="Team Management"
+          >
+            <Users className="h-3.5 w-3.5" />
+            <span>TEAMS</span>
+          </Link>
+
+          <button
+            ref={chatLauncherRef}
+            type="button"
+            onClick={() => setChatOpen((prev) => !prev)}
+            className="flex items-center gap-1.5 rounded border border-amber-700/50 bg-[#0e0a04]/90 px-3 py-1.5 font-mono text-[11px] font-medium tracking-wider text-amber-500/80 shadow-lg backdrop-blur transition-colors hover:border-amber-600/70 hover:text-amber-400"
+          >
+            {chatOpen ? (
+              <>
+                <ChevronDown className="h-3.5 w-3.5" />
+                <span>HIDE CHAT</span>
+              </>
+            ) : (
+              <>
+                <MessageSquare className="h-3.5 w-3.5" />
+                <span>CHAT</span>
+                {runningCount > 0 ? (
+                  <span className="rounded bg-amber-500/20 px-1 text-[10px] text-amber-400">
+                    {runningCount}
+                  </span>
+                ) : null}
+              </>
+            )}
+          </button>
+        </div>
       </div>
 
       {mainVoiceState !== "idle" || mainVoiceError ? (

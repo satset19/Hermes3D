@@ -12,13 +12,8 @@ import {
 import type {
   FacingPoint,
   FurnitureItem,
-  GymWorkoutLocation,
   QaLabStationLocation,
 } from "@/features/retro-office/core/types";
-export {
-  GYM_DEFAULT_TARGET,
-  resolveGymRoute,
-} from "@/features/retro-office/core/navigation/gymRoute";
 export { getJanitorCleaningStops } from "@/features/retro-office/core/navigation/janitorStops";
 export {
   resolveSmsBoothRoute,
@@ -464,10 +459,28 @@ export function astar(
   return [];
 }
 
-export const getDeskLocations = (items: FurnitureItem[]) =>
+export const getDeskLocations = (items: FurnitureItem[]): FacingPoint[] =>
   items
     .filter((item) => item.type === "desk_cubicle")
-    .map((item) => ({ x: item.x + 40, y: item.y - 5 }));
+    .map((desk) => {
+      const chair = items.find(
+        (i) =>
+          i.type === "chair" &&
+          Math.hypot(i.x - (desk.x + 20), i.y - (desk.y - 10)) < 60,
+      );
+      if (chair) {
+        return {
+          x: chair.x + 13,
+          y: chair.y + 10,
+          facing: Math.PI,
+        };
+      }
+      return {
+        x: desk.x + 33,
+        y: desk.y - 15,
+        facing: Math.PI,
+      };
+    });
 
 export const getMeetingSeatLocations = (items: FurnitureItem[]) => {
   // Meeting seats are inferred from chair placement in the conference area so standup
@@ -506,100 +519,6 @@ export const getMeetingSeatLocations = (items: FurnitureItem[]) => {
     };
   });
 };
-
-export const getGymWorkoutLocations = (
-  items: FurnitureItem[],
-): GymWorkoutLocation[] =>
-  items
-    .filter((item) =>
-      [
-        "treadmill",
-        "weight_bench",
-        "dumbbell_rack",
-        "exercise_bike",
-        "punching_bag",
-        "rowing_machine",
-        "kettlebell_rack",
-        "yoga_mat",
-      ].includes(item.type),
-    )
-    .sort((left, right) => left.y - right.y || left.x - right.x)
-    .map((item) => {
-      // Each workout target is an agent standing point plus a facing direction toward equipment.
-      const bounds = getItemBounds(item);
-      const equipmentCenterX = bounds.x + bounds.w / 2;
-      const equipmentCenterY = bounds.y + bounds.h / 2;
-      const facingTowardEquipment = (targetX: number, targetY: number) =>
-        Math.atan2(equipmentCenterX - targetX, equipmentCenterY - targetY);
-      if (item.type === "treadmill") {
-        const x = item.x + 35;
-        const y = item.y + 65;
-        return {
-          x,
-          y,
-          facing: facingTowardEquipment(x, y),
-          workoutStyle: "run",
-        };
-      }
-      if (item.type === "weight_bench") {
-        const x = item.x + 38;
-        const y = item.y + 20;
-        return {
-          x,
-          y,
-          facing: facingTowardEquipment(x, y),
-          workoutStyle: "lift",
-        };
-      }
-      if (item.type === "dumbbell_rack" || item.type === "kettlebell_rack") {
-        const x = item.x - 18;
-        const y = item.y + 14;
-        return {
-          x,
-          y,
-          facing: facingTowardEquipment(x, y),
-          workoutStyle: "lift",
-        };
-      }
-      if (item.type === "exercise_bike") {
-        const x = item.x + 18;
-        const y = item.y + 28;
-        return {
-          x,
-          y,
-          facing: facingTowardEquipment(x, y),
-          workoutStyle: "bike",
-        };
-      }
-      if (item.type === "rowing_machine") {
-        const x = item.x + 28;
-        const y = item.y + 16;
-        return {
-          x,
-          y,
-          facing: facingTowardEquipment(x, y),
-          workoutStyle: "row",
-        };
-      }
-      if (item.type === "yoga_mat") {
-        const x = item.x + 35;
-        const y = item.y + 15;
-        return {
-          x,
-          y,
-          facing: facingTowardEquipment(x, y),
-          workoutStyle: "stretch",
-        };
-      }
-      const x = item.x - 18;
-      const y = item.y + 14;
-      return {
-        x,
-        y,
-        facing: facingTowardEquipment(x, y),
-        workoutStyle: "box",
-      };
-    });
 
 export const getQaLabStations = (
   items: FurnitureItem[],

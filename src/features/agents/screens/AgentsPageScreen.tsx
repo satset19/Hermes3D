@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { AgentChatPanel } from "@/features/agents/components/AgentChatPanel";
+import { AgentApprovalPopupStack } from "@/features/office/components/AgentApprovalPopup";
 import { AgentAvatarCreatorModal } from "@/features/agents/components/AgentAvatarCreatorModal";
 import { AgentCreateModal } from "@/features/agents/components/AgentCreateModal";
 import {
@@ -29,6 +30,12 @@ import {
   useAgentStore,
 } from "@/features/agents/state/store";
 import type { AgentState } from "@/features/agents/state/store";
+import {
+  TeamStoreProvider,
+  useOptionalTeamStore,
+  isAgentInDisabledTeam,
+} from "@/features/teams/store";
+import type { Team } from "@/features/teams/types";
 import { createGatewayRuntimeEventHandler } from "@/features/agents/state/gatewayRuntimeEventHandler";
 import {
   type CronJobSummary,
@@ -147,7 +154,7 @@ const resolveNextNewAgentName = (agents: AgentState[]) => {
   throw new Error("Unable to allocate a unique agent name.");
 };
 
-const AgentsPageScreen = () => {
+const AgentsPageScreenContent = () => {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
@@ -203,6 +210,9 @@ const AgentsPageScreen = () => {
   });
 
   const { state, dispatch, hydrateAgents, setError, setLoading } = useAgentStore();
+  const teamStore = useOptionalTeamStore();
+  const hydrateTeams = teamStore?.hydrateTeams;
+  const teams = useMemo(() => teamStore?.state.teams ?? [], [teamStore?.state.teams]);
   const [showConnectionPanel, setShowConnectionPanel] = useState(false);
   const [focusFilter, setFocusFilter] = useState<FocusFilter>("all");
   const [focusedPreferencesLoaded, setFocusedPreferencesLoaded] = useState(false);
@@ -257,11 +267,32 @@ const AgentsPageScreen = () => {
   );
   const focusedAgent = useMemo(() => {
     if (filteredAgents.length === 0) return null;
-    const selectedInFilter = selectedAgent
-      ? filteredAgents.find((entry) => entry.agentId === selectedAgent.agentId)
-      : null;
-    return selectedInFilter ?? filteredAgents[0] ?? null;
-  }, [filteredAgents, selectedAgent]);
+    const selectedInFilter =
+      selectedAgent && !isAgentInDisabledTeam(teams, selectedAgent.teamId)
+        ? filteredAgents.find(
+            (entry) =>
+              entry.agentId === selectedAgent.agentId &&
+              !isAgentInDisabledTeam(teams, entry.teamId)
+          )
+        : null;
+    if (selectedInFilter) return selectedInFilter;
+    return (
+      filteredAgents.find((entry) => !isAgentInDisabledTeam(teams, entry.teamId)) ??
+      null
+    );
+  }, [filteredAgents, selectedAgent, teams]);
+
+  useEffect(() => {
+    if (!state.selectedAgentId) return;
+    const currentSelected = agents.find((a) => a.agentId === state.selectedAgentId);
+    if (currentSelected && isAgentInDisabledTeam(teams, currentSelected.teamId)) {
+      const nextVisible =
+        filteredAgents.find((a) => !isAgentInDisabledTeam(teams, a.teamId)) ??
+        agents.find((a) => !isAgentInDisabledTeam(teams, a.teamId)) ??
+        null;
+      dispatch({ type: "selectAgent", agentId: nextVisible?.agentId ?? null });
+    }
+  }, [state.selectedAgentId, agents, teams, filteredAgents, dispatch]);
   const avatarCreatorAgent = useMemo(
     () =>
       avatarCreatorAgentId
@@ -468,6 +499,7 @@ const AgentsPageScreen = () => {
         commands,
         setGatewayConfigSnapshot,
         hydrateAgents,
+        hydrateTeams,
         dispatchUpdateAgent: (agentId, patch) => {
           dispatch({ type: "updateAgent", agentId, patch });
         },
@@ -766,6 +798,7 @@ const AgentsPageScreen = () => {
     handleSend,
     removeQueuedMessage,
     handleNewSession,
+    handleClearChat,
     handleStopRun,
     queueLivePatch,
     clearPendingLivePatch,
@@ -836,6 +869,12 @@ const AgentsPageScreen = () => {
     agents,
     flushPendingDraft,
     dispatchSelectAgent: (agentId) => {
+      if (agentId !== null) {
+        const target = agents.find((a) => a.agentId === agentId);
+        if (target && isAgentInDisabledTeam(teams, target.teamId)) {
+          return;
+        }
+      }
       dispatch({ type: "selectAgent", agentId });
     },
     setInspectSidebar,
@@ -847,6 +886,17 @@ const AgentsPageScreen = () => {
     replace: router.replace,
     confirmDiscard: () => window.confirm("Discard changes?"),
   });
+  const handleFleetSelectAgentWithTeamCheck = useCallback(
+    (agentId: string) => {
+      const targetAgent = agents.find((a) => a.agentId === agentId);
+      if (targetAgent && isAgentInDisabledTeam(teams, targetAgent.teamId)) {
+        return;
+      }
+      handleFleetSelectAgent(agentId);
+    },
+    [agents, teams, handleFleetSelectAgent]
+  );
+
   const handleOpenSystemSkillSetup = useCallback(
     (skillKey?: string) => {
       const normalized = skillKey?.trim() ?? "";
@@ -1207,6 +1257,25 @@ const AgentsPageScreen = () => {
     });
     runtimeEventHandlerRef.current = handler;
     const unsubscribe = client.onEvent((event: EventFrame) => {
+      if (event.event === "teams") {
+        const payload = event.payload as { teams?: Team[] } | undefined;
+        if (Array.isArray(payload?.teams)) {
+          hydrateTeams?.(payload.teams);
+        }
+      }
+      if (event.event === "chat.cleared") {
+        const payload = event.payload as { sessionKey?: string } | undefined;
+        const clearedKey = payload?.sessionKey;
+        if (clearedKey) {
+          const matchedAgent = stateRef.current.agents.find(
+            (a) => a.sessionKey === clearedKey || `agent:${a.agentId}:main` === clearedKey
+          );
+          if (matchedAgent) {
+            dispatch({ type: "clearChat", agentId: matchedAgent.agentId });
+          }
+        }
+        return;
+      }
       handler.handleEvent(event);
       handleGatewayEventIngress(event);
     });
@@ -1679,7 +1748,12 @@ const AgentsPageScreen = () => {
                   }}
                   createDisabled={status !== "connected" || createAgentBusy || state.loading}
                   createBusy={createAgentBusy}
-                  onSelectAgent={handleFleetSelectAgent}
+                  onSelectAgent={handleFleetSelectAgentWithTeamCheck}
+                  onToggleTeam={(teamId, enabled) => {
+                    client.call("teams.toggle", { teamId, enabled }).catch((err) => {
+                      console.warn("Failed to toggle team:", err);
+                    });
+                  }}
                 />
               </div>
               <div
@@ -1702,6 +1776,7 @@ const AgentsPageScreen = () => {
                           settingsMutationController.handleRenameAgent(focusedAgent.agentId, name)
                         }
                         onNewSession={() => handleNewSession(focusedAgent.agentId)}
+                        onClearChat={() => handleClearChat(focusedAgent.agentId)}
                         onModelChange={(value) =>
                           handleModelChange(focusedAgent.agentId, focusedAgent.sessionKey, value)
                         }
@@ -1754,6 +1829,21 @@ const AgentsPageScreen = () => {
           )}
         </div>
       </div>
+      <AgentApprovalPopupStack
+        agents={agents}
+        approvalsByAgentId={pendingExecApprovalsByAgentId}
+        unscopedApprovals={unscopedPendingExecApprovals}
+        onResolve={(id, decision) => {
+          void handleResolveExecApproval(id, decision);
+        }}
+        onSelectAgent={(agentId) => {
+          const targetAgent = agents.find((a) => a.agentId === agentId);
+          if (targetAgent && isAgentInDisabledTeam(teams, targetAgent.teamId)) {
+            return;
+          }
+          dispatch({ type: "selectAgent", agentId });
+        }}
+      />
       {createAgentModalOpen ? (
         <AgentCreateModal
           open={createAgentModalOpen}
@@ -1838,6 +1928,18 @@ const AgentsPageScreen = () => {
       ) : null}
     </div>
   );
+};
+
+const AgentsPageScreen = () => {
+  const teamCtx = useOptionalTeamStore();
+  if (!teamCtx) {
+    return (
+      <TeamStoreProvider>
+        <AgentsPageScreenContent />
+      </TeamStoreProvider>
+    );
+  }
+  return <AgentsPageScreenContent />;
 };
 
 export default AgentsPageScreen;

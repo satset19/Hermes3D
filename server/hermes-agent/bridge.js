@@ -64,14 +64,39 @@ const errorMessage = (err) => {
 };
 
 /** hermes-agent history rows use `text`; Hermes3D expects `content`. */
+const normalizeTimestampMs = (value) => {
+  if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+    return value < 100_000_000_000 ? Math.round(value * 1000) : Math.round(value);
+  }
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Date.parse(value);
+    if (!Number.isNaN(parsed) && parsed > 0) return parsed;
+    const num = Number(value.trim());
+    if (Number.isFinite(num) && num > 0) {
+      return num < 100_000_000_000 ? Math.round(num * 1000) : Math.round(num);
+    }
+  }
+  return undefined;
+};
+
 const toHermes3dMessages = (messages) => {
   if (!Array.isArray(messages)) return [];
   return messages
     .filter((m) => m && (m.role === "user" || m.role === "assistant"))
-    .map((m) => ({
-      role: m.role,
-      content: typeof m.text === "string" ? m.text : String(m.content ?? ""),
-    }));
+    .map((m) => {
+      const row = {
+        role: m.role,
+        content: typeof m.text === "string" ? m.text : String(m.content ?? ""),
+      };
+      const ts =
+        normalizeTimestampMs(m.timestamp) ??
+        normalizeTimestampMs(m.createdAt) ??
+        normalizeTimestampMs(m.atMs) ??
+        normalizeTimestampMs(m.time) ??
+        normalizeTimestampMs(m.created);
+      if (typeof ts === "number") row.timestamp = ts;
+      return row;
+    });
 };
 
 const parseTimestampMs = (value) => {
@@ -237,10 +262,16 @@ function createHermesAgentUpstream(options) {
     return upstream;
   }
 
-  /** sessionKey -> { runtimeId, storedId, title } */
+  /** sessionKey -> { runtimeId, storedId, title, startedAt, updatedAt } */
   const sessions = new Map();
+  /** sessionKey -> persistent updatedAt ms timestamp */
+  const sessionUpdatedAt = new Map();
   /** runtime session id -> sessionKey */
   const sessionKeyByRuntimeId = new Map();
+  /** Connection start timestamp: drop historical office.speech turns from before this connection */
+  let connectionStartTimeMs = Date.now();
+  /** Deduplication for published office speech turns to prevent replaying backlog on reconnect */
+  const seenSpeechKeys = new Set();
   /**
    * Hermes3D agents, one per hermes-agent profile.
    *
@@ -278,10 +309,26 @@ function createHermesAgentUpstream(options) {
   const rememberSession = (sessionKey, result) => {
     const runtimeId = asString(result?.session_id);
     if (!runtimeId) throw new Error("hermes-agent did not return a session id.");
+    const startedAt =
+      typeof result?.started_at === "number"
+        ? normalizeTimestampMs(result.started_at)
+        : typeof result?.info?.started_at === "number"
+          ? normalizeTimestampMs(result.info.started_at)
+          : null;
+    const updatedAt =
+      sessionUpdatedAt.get(sessionKey) ??
+      (typeof result?.updated_at === "number" ? normalizeTimestampMs(result.updated_at) : null) ??
+      startedAt ??
+      null;
+    if (updatedAt && !sessionUpdatedAt.has(sessionKey)) {
+      sessionUpdatedAt.set(sessionKey, updatedAt);
+    }
     const entry = {
       runtimeId,
       storedId: asString(result?.stored_session_id) || asString(result?.session_key),
       title: asString(result?.info?.title) || asString(result?.title),
+      startedAt,
+      updatedAt,
     };
     sessions.set(sessionKey, entry);
     sessionKeyByRuntimeId.set(runtimeId, sessionKey);
@@ -384,17 +431,22 @@ function createHermesAgentUpstream(options) {
             errorMessage: asString(payload?.error, "hermes-agent reported an error"),
           });
         } else {
+          const now = Date.now();
+          sessionUpdatedAt.set(sessionKey, now);
+          const existing = sessions.get(sessionKey);
+          if (existing) existing.updatedAt = now;
+
           emitChat(runId, sessionKey, "final", {
             stopReason: "end_turn",
             message: { role: "assistant", content: finalText },
           });
           emitEvent("presence", {
             sessions: {
-              recent: [{ key: sessionKey, updatedAt: Date.now() }],
+              recent: [{ key: sessionKey, updatedAt: now }],
               byAgent: [
                 {
                   agentId: parseSessionKey(sessionKey).agentId,
-                  recent: [{ key: sessionKey, updatedAt: Date.now() }],
+                  recent: [{ key: sessionKey, updatedAt: now }],
                 },
               ],
             },
@@ -500,11 +552,28 @@ function createHermesAgentUpstream(options) {
       log(`[office-speech] no agent for profile "${turn.profile}"; turn ignored`);
       return;
     }
+    const turnAtMs = normalizeTimestampMs(turn.atMs) ?? Date.now();
+    // Drop historical turns that occurred before this bridge connection was established.
+    if (turnAtMs <= connectionStartTimeMs) {
+      log(`[office-speech] dropped historical turn from ${turn.profile} (atMs=${turnAtMs} <= connectionStart=${connectionStartTimeMs})`);
+      return;
+    }
+    // Prevent replaying backlog / duplicate turns on socket reconnect
+    const turnKey = `${agent.id}:${turnAtMs}:${turn.text}`;
+    if (seenSpeechKeys.has(turnKey)) {
+      log(`[office-speech] dropped duplicate turn from ${turn.profile}`);
+      return;
+    }
+    seenSpeechKeys.add(turnKey);
+    if (seenSpeechKeys.size > 200) {
+      const oldest = seenSpeechKeys.values().next().value;
+      seenSpeechKeys.delete(oldest);
+    }
     emitEvent("office.speech", {
       agentId: agent.id,
       name: agent.name,
       text: turn.text,
-      atMs: turn.atMs,
+      atMs: turnAtMs,
       sessionId: turn.sessionId,
     });
   };
@@ -520,6 +589,7 @@ function createHermesAgentUpstream(options) {
   };
 
   const handleConnect = async (id) => {
+    connectionStartTimeMs = Date.now();
     await loadAgentRoster();
     // Only worth subscribing once the roster exists to map turns onto.
     startOfficeSpeech();
@@ -624,23 +694,39 @@ function createHermesAgentUpstream(options) {
             } catch (err) {
               log(`[hermes-agent] session.list for "${agent.id}" failed: ${errorMessage(err)}`);
             }
+            const mainKey = `agent:${agent.id}:${MAIN_KEY}`;
+            const existingEntry = sessions.get(mainKey);
+            const firstStoredAt =
+              typeof stored[0]?.started_at === "number"
+                ? normalizeTimestampMs(stored[0].started_at)
+                : null;
+            const mainUpdatedAt =
+              sessionUpdatedAt.get(mainKey) ??
+              (typeof existingEntry?.updatedAt === "number" ? existingEntry.updatedAt : null) ??
+              firstStoredAt ??
+              null;
+
             return [
               {
-                key: `agent:${agent.id}:${MAIN_KEY}`,
+                key: mainKey,
                 agentId: agent.id,
-                updatedAt: Date.now(),
+                updatedAt: mainUpdatedAt,
                 displayName: "Main",
                 origin: { label: agent.name, provider: "hermes" },
                 modelProvider: "hermes",
               },
-              ...stored.map((s) => ({
-                key: `agent:${agent.id}:${asString(s.id)}`,
-                agentId: agent.id,
-                updatedAt: typeof s.started_at === "number" ? s.started_at * 1000 : null,
-                displayName: asString(s.title, "Session"),
-                origin: { label: agent.name, provider: "hermes" },
-                modelProvider: "hermes",
-              })),
+              ...stored.map((s) => {
+                const sUpdatedAt = typeof s.started_at === "number" ? normalizeTimestampMs(s.started_at) : null;
+                const sKey = `agent:${agent.id}:${asString(s.id)}`;
+                return {
+                  key: sKey,
+                  agentId: agent.id,
+                  updatedAt: sessionUpdatedAt.get(sKey) ?? sUpdatedAt,
+                  displayName: asString(s.title, "Session"),
+                  origin: { label: agent.name, provider: "hermes" },
+                  modelProvider: "hermes",
+                };
+              }),
             ];
           })
         );
@@ -659,13 +745,23 @@ function createHermesAgentUpstream(options) {
               const history = await client.request("session.history", {
                 session_id: entry.runtimeId,
               });
-              const items = toHermes3dMessages(history?.messages)
-                .slice(-limit)
-                .map((m) => ({
-                  role: m.role,
-                  text: m.content.slice(0, maxChars),
-                  timestamp: Date.now(),
-                }));
+              const rawItems = toHermes3dMessages(history?.messages).slice(-limit);
+              const items = rawItems.map((m) => ({
+                role: m.role,
+                text: m.content.slice(0, maxChars),
+                timestamp: typeof m.timestamp === "number" ? m.timestamp : 0,
+              }));
+              if (items.length > 0) {
+                const lastItem = items[items.length - 1];
+                if (typeof lastItem?.timestamp === "number" && lastItem.timestamp > 0) {
+                  if (!sessionUpdatedAt.has(key)) {
+                    sessionUpdatedAt.set(key, lastItem.timestamp);
+                  }
+                  if (entry && !entry.updatedAt) {
+                    entry.updatedAt = lastItem.timestamp;
+                  }
+                }
+              }
               return { key, status: items.length ? "ok" : "empty", items };
             } catch {
               return { key, status: "empty", items: [] };
@@ -708,6 +804,7 @@ function createHermesAgentUpstream(options) {
           } catch {}
         }
         sessions.delete(key);
+        sessionUpdatedAt.delete(key);
         return resOk(id, { ok: true });
       }
 
@@ -765,13 +862,33 @@ function createHermesAgentUpstream(options) {
 
       case "chat.history": {
         const sessionKey = asString(p.sessionKey, defaultMainKey());
-        const entry = sessions.get(sessionKey);
+        let entry = sessions.get(sessionKey);
+        if (!entry?.runtimeId) {
+          try {
+            entry = await ensureSession(sessionKey);
+          } catch (err) {
+            log(`[hermes-agent] session.history ensureSession failed: ${errorMessage(err)}`);
+            return resOk(id, { sessionKey, messages: [] });
+          }
+        }
         if (!entry?.runtimeId) return resOk(id, { sessionKey, messages: [] });
         try {
           const history = await client.request("session.history", {
             session_id: entry.runtimeId,
           });
-          return resOk(id, { sessionKey, messages: toHermes3dMessages(history?.messages) });
+          const messages = toHermes3dMessages(history?.messages);
+          if (messages.length > 0) {
+            const lastMsg = messages[messages.length - 1];
+            if (typeof lastMsg?.timestamp === "number" && lastMsg.timestamp > 0) {
+              if (!sessionUpdatedAt.has(sessionKey)) {
+                sessionUpdatedAt.set(sessionKey, lastMsg.timestamp);
+              }
+              if (entry && !entry.updatedAt) {
+                entry.updatedAt = lastMsg.timestamp;
+              }
+            }
+          }
+          return resOk(id, { sessionKey, messages });
         } catch (err) {
           log(`[hermes-agent] session.history failed: ${errorMessage(err)}`);
           return resOk(id, { sessionKey, messages: [] });
@@ -789,7 +906,14 @@ function createHermesAgentUpstream(options) {
       }
 
       case "status": {
-        const recent = [...sessions.keys()].map((key) => ({ key, updatedAt: Date.now() }));
+        const recent = [...sessions.keys()]
+          .map((key) => {
+            const updatedAt =
+              sessionUpdatedAt.get(key) ??
+              (typeof sessions.get(key)?.updatedAt === "number" ? sessions.get(key).updatedAt : null);
+            return typeof updatedAt === "number" ? { key, updatedAt } : null;
+          })
+          .filter(Boolean);
         const byAgent = agentRoster.map((agent) => ({
           agentId: agent.id,
           recent: recent.filter((entry) => parseSessionKey(entry.key).agentId === agent.id),
@@ -865,11 +989,17 @@ function createHermesAgentUpstream(options) {
         const decision = asString(p.decision, "deny");
         const runtimeId = [...sessions.values()][0]?.runtimeId;
         if (requestId && runtimeId) {
+          const choice =
+            decision === "allow-always" || decision === "always"
+              ? "always"
+              : decision === "allow-once" || decision === "once" || decision === "allow"
+                ? "once"
+                : "deny";
           try {
             await client.request("approval.respond", {
               session_id: runtimeId,
               request_id: requestId,
-              choice: decision === "allow" ? "once" : "deny",
+              choice,
             });
           } catch (err) {
             log(`[hermes-agent] approval.respond failed: ${errorMessage(err)}`);
@@ -1010,6 +1140,7 @@ function createHermesAgentUpstream(options) {
 module.exports = {
   createHermesAgentUpstream,
   toHermes3dMessages,
+  normalizeTimestampMs,
   toHermes3dCronJobs,
   toHermes3dSchedule,
   toHermes3dAgents,

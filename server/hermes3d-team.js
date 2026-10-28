@@ -31,11 +31,26 @@ const str = (v) => (typeof v === "string" ? v.trim() : "");
 function createTeamManager({
   getAgent, listAgents, runAgentTurn, broadcast, randomId,
   now = () => Date.now(), runTimeoutMs = 20 * 60_000,
+  isTeamEnabled, getTeam,
 }) {
   const runs = new Map(); // runId -> run record
   const busy = new Map(); // agentId -> runId currently occupying that agent
   const waiters = new Map(); // runId -> [wake fn]
   const iso = () => new Date(now()).toISOString();
+
+  function isAgentTeamDisabled(agent) {
+    if (!agent) return false;
+    const teamId = typeof agent.teamId === "string" ? agent.teamId.trim() : "";
+    if (!teamId) return false;
+    if (typeof isTeamEnabled === "function") {
+      return isTeamEnabled(teamId, agent) === false;
+    }
+    if (typeof getTeam === "function") {
+      const team = getTeam(teamId);
+      return Boolean(team && team.enabled === false);
+    }
+    return false;
+  }
 
   // streamOneTurn has no timeout of its own; without this a hung run keeps the target busy forever.
   // The abort reaches runAgentTurn, which closes the Hermes stream so the Hermes session stops too.
@@ -90,8 +105,26 @@ function createTeamManager({
     if (!callerAgent) {
       return { ok: false, error: `Unknown caller_agent_id "${caller}". Use the agent_id stated in your system prompt.` };
     }
+    if (isAgentTeamDisabled(callerAgent)) {
+      return {
+        ok: false,
+        code: "caller_team_disabled",
+        error: "caller_team_disabled",
+        agent_id: caller,
+        message: `Caller agent "${callerAgent.name || caller}" belongs to disabled team "${callerAgent.teamId}". Enable the team first.`,
+      };
+    }
     const targetAgent = target ? getAgent(target) : null;
     if (!targetAgent) return { ok: false, error: `Unknown agent_id "${target}". Call list_team first.` };
+    if (isAgentTeamDisabled(targetAgent)) {
+      return {
+        ok: false,
+        code: "team_disabled",
+        error: "team_disabled",
+        agent_id: target,
+        message: `Target agent "${targetAgent.name || target}" belongs to disabled team "${targetAgent.teamId}". Enable the team first.`,
+      };
+    }
     if (target === caller) return { ok: false, error: "Cannot assign a task to yourself." };
     if (!task) return { ok: false, error: "task is required." };
     if (busy.has(target)) return { ok: false, error: "busy", agent_id: target, run_id: busy.get(target) };

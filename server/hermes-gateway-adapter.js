@@ -28,6 +28,7 @@ const path = require("path");
 const { WebSocketServer } = require("ws");
 const { buildTeamToolGuide, createTeamManager, createTeamHttpHandler } = require("./hermes3d-team");
 const { createRunAgentTurn, closeDanglingTurns } = require("./hermes3d-team-turn");
+const mongoDb = require("./db/mongo");
 
 function loadDotenvFile(filePath) {
   if (!fs.existsSync(filePath)) return;
@@ -54,6 +55,7 @@ function loadRuntimeEnv() {
   const cwd = process.cwd();
   loadDotenvFile(path.join(cwd, ".env.local"));
   loadDotenvFile(path.join(cwd, ".env"));
+  loadDotenvFile(path.join(cwd, ".env.hermes"));
 }
 
 loadRuntimeEnv();
@@ -71,6 +73,71 @@ const MAIN_KEY = "main";
 const MAIN_SESSION_KEY = `agent:${AGENT_ID}:${MAIN_KEY}`;
 const CONFIG_PATH = `${HOME}/.hermes/config.json`;
 const MAX_TOOL_ROUNDS = 8;
+const CHAT_STREAM_THROTTLE_MS = 50;
+
+/**
+ * Throttle streaming delta text emissions to client WebSocket connections.
+ * Emits leading delta immediately, buffers intermediate chunks up to intervalMs (50ms),
+ * and supports instant flush / cancellation for clean final frame delivery.
+ */
+function createThrottledDeltaEmitter(emitFn, intervalMs = CHAT_STREAM_THROTTLE_MS) {
+  let timer = null;
+  let lastSentTime = 0;
+  let pendingText = null;
+
+  const emit = (text) => {
+    pendingText = text;
+    const now = Date.now();
+    const elapsed = now - lastSentTime;
+
+    if (elapsed >= intervalMs) {
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      lastSentTime = now;
+      pendingText = null;
+      emitFn(text);
+    } else if (!timer) {
+      timer = setTimeout(() => {
+        timer = null;
+        if (pendingText !== null) {
+          const buffered = pendingText;
+          pendingText = null;
+          lastSentTime = Date.now();
+          try {
+            emitFn(buffered);
+          } catch (err) {
+            console.error("[hermes-adapter] Throttled delta emit error:", sanitizeErrorMessage(err));
+          }
+        }
+      }, intervalMs - elapsed);
+    }
+  };
+
+  emit.flush = () => {
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+    if (pendingText !== null) {
+      const buffered = pendingText;
+      pendingText = null;
+      lastSentTime = Date.now();
+      emitFn(buffered);
+    }
+  };
+
+  emit.cancel = () => {
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+    pendingText = null;
+  };
+
+  return emit;
+}
 
 // ---------------------------------------------------------------------------
 // Orchestrator system prompt
@@ -271,6 +338,78 @@ const agentRegistry = new Map([
   }],
 ]);
 
+const { AgentSimulationEngine } = require("./agent-simulation");
+const agentSimulation = new AgentSimulationEngine();
+const defaultOfficeMap = {
+  workspaceId: "default",
+  officeVersionId: "1",
+  canvas: { width: 800, height: 600 },
+  zones: [
+    { type: "desk_zone", shape: { points: [{ x: 150, y: 150 }] } },
+    { type: "meeting_room", shape: { points: [{ x: 400, y: 300 }] } },
+    { type: "hallway", shape: { points: [{ x: 300, y: 200 }] } },
+  ],
+  objects: [],
+};
+
+function buildPresencePayload(extraSessions = {}) {
+  const disabledTeamIds = new Set(
+    [...teamRegistry.values()].filter((t) => !t.enabled).map((t) => t.id)
+  );
+  const agentsArray = [...agentRegistry.values()]
+    .filter((a) => !a.teamId || !disabledTeamIds.has(a.teamId))
+    .map((a) => ({
+      agentId: a.id,
+      state: "working",
+    }));
+  agentSimulation.update(agentsArray, defaultOfficeMap, 200);
+  const agentPositions = agentSimulation.agentPositions;
+  const agentsPresence = agentsArray.map((agent) => {
+    const pos = agentPositions.get(agent.agentId) || { x: 150, y: 150 };
+    return {
+      agentId: agent.agentId,
+      name: agentRegistry.get(agent.agentId)?.name || agent.agentId,
+      state: agent.state,
+      x: pos.x,
+      y: pos.y,
+    };
+  });
+  return {
+    workspaceId: "default",
+    timestamp: new Date().toISOString(),
+    agents: agentsPresence,
+    sessions: {
+      recent: extraSessions.recent || [],
+      byAgent: extraSessions.byAgent || [...agentRegistry.keys()].map((aid) => ({
+        agentId: aid,
+        recent: [],
+      })),
+    },
+  };
+}
+
+// Start simulation tick interval
+const simTickInterval = setInterval(() => {
+  const disabledTeamIds = new Set(
+    [...teamRegistry.values()].filter((t) => !t.enabled).map((t) => t.id)
+  );
+  const agentsArray = [...agentRegistry.values()]
+    .filter((a) => !a.teamId || !disabledTeamIds.has(a.teamId))
+    .map((a) => ({
+      agentId: a.id,
+      state: "working",
+    }));
+  agentSimulation.update(agentsArray, defaultOfficeMap, 200);
+  broadcastEvent({
+    type: "event",
+    event: "presence",
+    payload: buildPresencePayload(),
+  });
+}, 200);
+if (simTickInterval && typeof simTickInterval.unref === "function") {
+  simTickInterval.unref();
+}
+
 // Set of all active sendEvent functions (one per connected WS client)
 /** @type {Set<(frame: object) => void>} */
 const activeSendEventFns = new Set();
@@ -283,10 +422,125 @@ const HISTORY_FILE = path.join(HOME, ".hermes", "hermes3d-history.json");
 const AGENT_FILES_FILE = path.join(HOME, ".hermes", "hermes3d-agent-files.json");
 const AGENTS_FILE = path.join(HOME, ".hermes", "hermes3d-agents.json");
 const SESSIONS_FILE = path.join(HOME, ".hermes", "hermes3d-sessions.json");
+const TEAMS_FILE = path.join(HOME, ".hermes", "hermes3d-teams.json");
 let persistDebounceTimer = null;
 let persistAgentFilesTimer = null;
 let persistAgentsTimer = null;
 let persistSessionsTimer = null;
+let persistTeamsTimer = null;
+const teamRegistry = new Map();
+
+const DEFAULT_TEAM_IT_ID = "team-it";
+const DEFAULT_TEAM_IT_NAME = "Team IT";
+const DEFAULT_TEAM_IT_AGENT_IDS = [
+  "hermes",
+  "maker-fd54ae",
+  "captain-9860a1",
+  "architect-8dc35f",
+  "automator-e6fa33",
+  "herald-c9d827",
+  "tester-ac9ce4",
+  "fe-specialist-1c1143",
+  "backend-5f219b",
+  "designer-1c1143",
+];
+
+function saveTeamsToDisk(sync = false) {
+  if (sync) {
+    if (persistTeamsTimer) {
+      clearTimeout(persistTeamsTimer);
+      persistTeamsTimer = null;
+    }
+    try {
+      const data = [...teamRegistry.values()];
+      fs.mkdirSync(path.dirname(TEAMS_FILE), { recursive: true });
+      fs.writeFileSync(TEAMS_FILE, JSON.stringify(data, null, 2), "utf8");
+    } catch (err) {
+      console.warn("[hermes-adapter] Could not save teams:", err.message);
+    }
+    return;
+  }
+  if (persistTeamsTimer) clearTimeout(persistTeamsTimer);
+  persistTeamsTimer = setTimeout(() => {
+    persistTeamsTimer = null;
+    try {
+      const data = [...teamRegistry.values()];
+      fs.mkdirSync(path.dirname(TEAMS_FILE), { recursive: true });
+      fs.writeFileSync(TEAMS_FILE, JSON.stringify(data, null, 2), "utf8");
+    } catch (err) {
+      console.warn("[hermes-adapter] Could not save teams:", err.message);
+    }
+  }, 300);
+}
+
+async function seedTeamItIfNeeded(options = {}) {
+  const targetTeamRegistry = options.teamRegistry || teamRegistry;
+  const targetAgentRegistry = options.agentRegistry || agentRegistry;
+  const targetMongoDb = options.mongoDb || mongoDb;
+  const saveTeamsFn = options.saveTeamsToDisk || saveTeamsToDisk;
+  const saveAgentsFn = options.saveAgentsToDisk || saveAgentsToDisk;
+
+  if (targetTeamRegistry.has(DEFAULT_TEAM_IT_ID)) {
+    return { created: false, team: targetTeamRegistry.get(DEFAULT_TEAM_IT_ID) };
+  }
+
+  const teamIt = {
+    id: DEFAULT_TEAM_IT_ID,
+    name: DEFAULT_TEAM_IT_NAME,
+    enabled: true,
+    createdAt: new Date().toISOString(),
+  };
+  targetTeamRegistry.set(DEFAULT_TEAM_IT_ID, teamIt);
+
+  const updatedAgents = [];
+  for (const agentId of DEFAULT_TEAM_IT_AGENT_IDS) {
+    const agent = targetAgentRegistry.get(agentId);
+    if (agent && !agent.teamId) {
+      agent.teamId = DEFAULT_TEAM_IT_ID;
+      updatedAgents.push(agent);
+    }
+  }
+
+  // Persist team to MongoDB
+  try {
+    if (targetMongoDb && typeof targetMongoDb.upsertTeam === "function") {
+      await targetMongoDb.upsertTeam(teamIt);
+    }
+  } catch (err) {
+    console.warn("[hermes-adapter] Could not upsert team-it to MongoDB:", sanitizeErrorMessage(err));
+  }
+
+  // Persist team to disk
+  if (typeof saveTeamsFn === "function") {
+    try {
+      saveTeamsFn(true);
+    } catch (err) {
+      console.warn("[hermes-adapter] Could not save teams to disk during seed:", sanitizeErrorMessage(err));
+    }
+  }
+
+  // Persist updated agents to MongoDB
+  for (const agent of updatedAgents) {
+    try {
+      if (targetMongoDb && typeof targetMongoDb.upsertAgentRecord === "function") {
+        await targetMongoDb.upsertAgentRecord(agent);
+      }
+    } catch (err) {
+      console.warn(`[hermes-adapter] Could not upsert agent ${agent.id} to MongoDB during team seed:`, sanitizeErrorMessage(err));
+    }
+  }
+
+  // Persist agents to disk
+  if (updatedAgents.length > 0 && typeof saveAgentsFn === "function") {
+    try {
+      saveAgentsFn(true);
+    } catch (err) {
+      console.warn("[hermes-adapter] Could not save agents to disk during team seed:", sanitizeErrorMessage(err));
+    }
+  }
+
+  return { created: true, team: teamIt, updatedAgentIds: updatedAgents.map((a) => a.id) };
+}
 
 function loadHistoryFromDisk() {
   try {
@@ -295,7 +549,18 @@ function loadHistoryFromDisk() {
       const data = JSON.parse(raw);
       if (data && typeof data === "object") {
         for (const [key, messages] of Object.entries(data)) {
-          if (Array.isArray(messages)) conversationHistory.set(key, messages);
+          if (Array.isArray(messages)) {
+            for (const msg of messages) {
+              if (msg && typeof msg === "object") {
+                const ts = resolveMessageTimestamp(msg);
+                if (ts > 0) {
+                  if (typeof msg.timestamp !== "number") msg.timestamp = ts;
+                  if (typeof msg.createdAt !== "number") msg.createdAt = ts;
+                }
+              }
+            }
+            conversationHistory.set(key, messages);
+          }
         }
         console.log(`[hermes-adapter] Loaded history for ${Object.keys(data).length} session(s).`);
       }
@@ -337,9 +602,27 @@ function saveAgentFilesToDisk() {
   }, 300);
 }
 
-function saveAgentsToDisk() {
+function saveAgentsToDisk(sync = false) {
+  if (sync) {
+    if (persistAgentsTimer) {
+      clearTimeout(persistAgentsTimer);
+      persistAgentsTimer = null;
+    }
+    try {
+      const data = [];
+      for (const agent of agentRegistry.values()) {
+        data.push(agent);
+      }
+      fs.mkdirSync(path.dirname(AGENTS_FILE), { recursive: true });
+      fs.writeFileSync(AGENTS_FILE, JSON.stringify(data, null, 2), "utf8");
+    } catch (err) {
+      console.warn("[hermes-adapter] Could not save agents:", sanitizeErrorMessage(err));
+    }
+    return;
+  }
   if (persistAgentsTimer) clearTimeout(persistAgentsTimer);
   persistAgentsTimer = setTimeout(() => {
+    persistAgentsTimer = null;
     try {
       const data = [];
       for (const agent of agentRegistry.values()) {
@@ -483,15 +766,49 @@ function seedDefaultOrchestratorBrainFiles() {
   }
 }
 
-function loadBrainSettingsFromDisk() {
-  // 1. Agents
+async function loadBrainSettingsFromDisk() {
+  // 1. Agents - load existing agents from MongoDB to seed agentRegistry
+  try {
+    const dbAgents = await mongoDb.getAgentsFromDb();
+    if (Array.isArray(dbAgents) && dbAgents.length > 0) {
+      for (const a of dbAgents) {
+        if (!a || !a.id) continue;
+        const existing = agentRegistry.get(a.id);
+        if (existing) {
+          agentRegistry.set(a.id, {
+            ...existing,
+            ...a,
+            settings: { ...(existing.settings || {}), ...(a.settings || {}) },
+          });
+        } else {
+          agentRegistry.set(a.id, {
+            id: a.id,
+            name: a.name || a.id,
+            workspace: a.workspace || path.join(HOME, ".hermes", `workspace-${a.id}`),
+            role: a.role || "",
+            systemPrompt: a.systemPrompt || `You are ${a.name || a.id}.`,
+            settings: a.settings || { wipe: false, continuity: true, model: HERMES_MODEL, mode: "yolo", yolo: true },
+            ...(a.identity ? { identity: a.identity } : {}),
+          });
+        }
+      }
+      console.log(`[hermes-adapter] Seeded ${dbAgents.length} agent(s) from MongoDB.`);
+    }
+  } catch (err) {
+    console.warn("[hermes-adapter] Could not load agents from MongoDB:", sanitizeErrorMessage(err));
+  }
+
+  // 1b. Load from local disk cache file
   try {
     if (fs.existsSync(AGENTS_FILE)) {
       const raw = fs.readFileSync(AGENTS_FILE, "utf8");
       const list = JSON.parse(raw);
       if (Array.isArray(list)) {
         for (const a of list) {
-          if (a && a.id) agentRegistry.set(a.id, a);
+          if (a && a.id) {
+            const cur = agentRegistry.get(a.id);
+            agentRegistry.set(a.id, cur ? { ...a, ...cur, settings: { ...(a.settings || {}), ...(cur.settings || {}) } } : a);
+          }
         }
         console.log(`[hermes-adapter] Loaded registry for ${agentRegistry.size} agent(s).`);
       }
@@ -500,20 +817,87 @@ function loadBrainSettingsFromDisk() {
     console.warn("[hermes-adapter] Could not load agents:", sanitizeErrorMessage(err));
   }
 
-  // 2. Sessions
+  // 1c. Seed any missing records from memory/disk to MongoDB
+  for (const agent of agentRegistry.values()) {
+    try {
+      await mongoDb.upsertAgentRecord(agent);
+    } catch (err) {
+      console.warn(`[hermes-adapter] Could not upsert agent ${agent.id} to MongoDB:`, sanitizeErrorMessage(err));
+    }
+  }
+
+  // 1d. Load teams from MongoDB
+  try {
+    const dbTeams = await mongoDb.getTeamsFromDb();
+    if (Array.isArray(dbTeams)) {
+      for (const t of dbTeams) {
+        if (t && t.id) teamRegistry.set(t.id, t);
+      }
+    }
+    console.log(`[hermes-adapter] Loaded ${teamRegistry.size} team(s) from MongoDB.`);
+  } catch (err) {
+    console.warn("[hermes-adapter] Could not load teams from MongoDB:", sanitizeErrorMessage(err));
+  }
+  // Fallback from disk
+  try {
+    if (fs.existsSync(TEAMS_FILE)) {
+      const raw = fs.readFileSync(TEAMS_FILE, "utf8");
+      const list = JSON.parse(raw);
+      if (Array.isArray(list)) {
+        for (const t of list) {
+          if (t && t.id && !teamRegistry.has(t.id)) teamRegistry.set(t.id, t);
+        }
+      }
+    }
+  } catch {}
+  // Sync to MongoDB
+  for (const t of teamRegistry.values()) {
+    mongoDb.upsertTeam(t).catch(() => {});
+  }
+
+  // 1e. Seed Team IT if absent (runs after DB/disk team load, preserves existing teams/membership)
+  try {
+    await seedTeamItIfNeeded();
+  } catch (err) {
+    console.warn("[hermes-adapter] Error during Team IT bootstrap:", sanitizeErrorMessage(err));
+  }
+
+  // 2. Sessions - load from MongoDB first, fallback to disk
+  try {
+    const dbSessions = await mongoDb.getSessionsFromDb();
+    if (Array.isArray(dbSessions) && dbSessions.length > 0) {
+      for (const s of dbSessions) {
+        if (!s || !s.sessionKey) continue;
+        sessionSettings.set(s.sessionKey, s);
+      }
+      console.log(`[hermes-adapter] Loaded ${dbSessions.length} session(s) from MongoDB.`);
+    }
+  } catch (err) {
+    console.warn("[hermes-adapter] Could not load sessions from MongoDB:", sanitizeErrorMessage(err));
+  }
+
+  // 2b. Load from local disk cache file
   try {
     if (fs.existsSync(SESSIONS_FILE)) {
       const raw = fs.readFileSync(SESSIONS_FILE, "utf8");
       const data = JSON.parse(raw);
       if (data && typeof data === "object") {
         for (const [k, v] of Object.entries(data)) {
-          sessionSettings.set(k, v);
+          const cur = sessionSettings.get(k);
+          sessionSettings.set(k, cur ? { ...v, ...cur } : v);
         }
         console.log(`[hermes-adapter] Loaded metadata for ${sessionSettings.size} session(s).`);
       }
     }
   } catch (err) {
     console.warn("[hermes-adapter] Could not load session settings:", sanitizeErrorMessage(err));
+  }
+
+  // 2c. Seed any session settings to MongoDB
+  for (const [key, val] of sessionSettings.entries()) {
+    try {
+      await mongoDb.upsertSessionRecord(key, val);
+    } catch {}
   }
 
   // 3. Agent files cache
@@ -531,7 +915,11 @@ function loadBrainSettingsFromDisk() {
     console.warn("[hermes-adapter] Could not load agent files:", sanitizeErrorMessage(err));
   }
 
-  // 4. Read from all agent workspaces on disk
+  // 4. Seed default orchestrator brain files
+  seedDefaultOrchestratorBrainFiles();
+  updateAgentSystemPromptFromFiles(AGENT_ID);
+
+  // 5. Read from all agent workspaces on disk and save workspace markdown brain files to MongoDB
   for (const [aid, agent] of agentRegistry.entries()) {
     const ws = agent.workspace || path.join(HOME, ".hermes", `workspace-${aid}`);
     try {
@@ -544,7 +932,10 @@ function loadBrainSettingsFromDisk() {
             try {
               const c = fs.readFileSync(fullPath, "utf8");
               agentFiles.set(`${aid}/${f}`, c);
-            } catch {}
+              await mongoDb.upsertBrainFile(aid, f, c, fullPath);
+            } catch (err) {
+              console.warn(`[hermes-adapter] Could not read/save brain file ${fullPath}:`, sanitizeErrorMessage(err));
+            }
           }
         }
       }
@@ -553,10 +944,97 @@ function loadBrainSettingsFromDisk() {
     }
   }
 
-  // 5. Seed default orchestrator brain files
-  seedDefaultOrchestratorBrainFiles();
-  updateAgentSystemPromptFromFiles(AGENT_ID);
+  // 4. Backfill any missing message timestamps in conversationHistory from MongoDB
+  try {
+    let touchedHistory = false;
+    for (const [key, messages] of conversationHistory.entries()) {
+      if (!Array.isArray(messages) || messages.length === 0) continue;
+      const hasMissing = messages.some((m) => !m.timestamp && !m.createdAt);
+      if (hasMissing) {
+        const dbMsgs = await mongoDb.getLatestMessages(key, Math.max(messages.length, 50));
+        if (Array.isArray(dbMsgs) && dbMsgs.length > 0) {
+          for (let i = 0; i < messages.length; i++) {
+            const m = messages[i];
+            if (!m.timestamp && !m.createdAt) {
+              const match = dbMsgs.find(
+                (dbm) => dbm.role === m.role && dbm.content === m.content
+              ) || dbMsgs[i];
+              if (match) {
+                const ts = resolveMessageTimestamp(match);
+                if (ts > 0) {
+                  m.createdAt = ts;
+                  m.timestamp = ts;
+                  touchedHistory = true;
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    if (touchedHistory) saveHistoryToDisk();
+  } catch (err) {
+    console.warn("[hermes-adapter] Could not sync missing history timestamps from MongoDB:", sanitizeErrorMessage(err));
+  }
+
+  saveAgentsToDisk();
+  saveAgentFilesToDisk();
+  saveTeamsToDisk();
   console.log(`[hermes-adapter] Loaded ${agentFiles.size} agent brain file(s) across local workspaces.`);
+}
+
+function resolveMessageTimestamp(msg) {
+  if (!msg || typeof msg !== "object") return 0;
+  for (const field of [msg.timestamp, msg.createdAt]) {
+    if (typeof field === "number" && Number.isFinite(field) && field > 0) {
+      return field;
+    }
+    if (field instanceof Date && !Number.isNaN(field.getTime())) {
+      return field.getTime();
+    }
+    if (typeof field === "string" && field.trim()) {
+      const parsed = Date.parse(field);
+      if (!Number.isNaN(parsed) && parsed > 0) return parsed;
+      const num = Number(field);
+      if (!Number.isNaN(num) && num > 0) return num;
+    }
+  }
+  if (msg._id && typeof msg._id.getTimestamp === "function") {
+    try {
+      const ms = msg._id.getTimestamp().getTime();
+      if (!Number.isNaN(ms) && ms > 0) return ms;
+    } catch {}
+  }
+  return 0;
+}
+
+function getSessionCreationTime(sessionKey, agent) {
+  const settings = sessionSettings.get(sessionKey);
+  if (settings) {
+    for (const val of [settings.createdAt, settings.created_at]) {
+      if (typeof val === "number" && Number.isFinite(val) && val > 0) return val;
+      if (val instanceof Date && !Number.isNaN(val.getTime())) return val.getTime();
+      if (typeof val === "string" && val.trim()) {
+        const ms = Date.parse(val);
+        if (!Number.isNaN(ms) && ms > 0) return ms;
+        const num = Number(val);
+        if (!Number.isNaN(num) && num > 0) return num;
+      }
+    }
+  }
+  if (agent) {
+    for (const val of [agent.createdAt, agent.created_at]) {
+      if (typeof val === "number" && Number.isFinite(val) && val > 0) return val;
+      if (val instanceof Date && !Number.isNaN(val.getTime())) return val.getTime();
+      if (typeof val === "string" && val.trim()) {
+        const ms = Date.parse(val);
+        if (!Number.isNaN(ms) && ms > 0) return ms;
+        const num = Number(val);
+        if (!Number.isNaN(num) && num > 0) return num;
+      }
+    }
+  }
+  return null;
 }
 
 function getHistory(sessionKey) {
@@ -876,33 +1354,56 @@ async function execSpawnAgent(args) {
     role, systemPrompt, settings: { wipe, continuity, model, boundaries, mode: "yolo", yolo: true },
   });
   saveAgentsToDisk();
+  mongoDb.upsertAgentRecord(agentRegistry.get(newId)).catch((err) => {
+    console.warn(`[hermes-adapter] Could not upsert spawned agent ${newId} to MongoDB:`, sanitizeErrorMessage(err));
+  });
 
   console.log(`[hermes-adapter] Spawned agent: ${name} (${newId})`);
 
   // Broadcast presence so the 3D office loads the new agent immediately
   broadcastEvent({
     type: "event", event: "presence",
-    payload: {
-      sessions: {
-        recent: [],
-        byAgent: [...agentRegistry.keys()].map((aid) => ({
-          agentId: aid,
-          recent: [],
-        })),
-      },
-    },
+    payload: buildPresencePayload(),
   });
 
   return JSON.stringify({ ok: true, agent_id: newId, name, role });
 }
 
-async function execDelegateTask(args) {
+async function execDelegateTask(args, sendEvent, callerAgentId) {
   const targetId = typeof args.agent_id === "string" ? args.agent_id.trim() : "";
   const message = typeof args.message === "string" ? args.message.trim() : "";
   if (!targetId || !message) return JSON.stringify({ ok: false, error: "agent_id and message required" });
 
   const agent = agentRegistry.get(targetId);
   if (!agent) return JSON.stringify({ ok: false, error: `Agent ${targetId} not found` });
+
+  const callerId = typeof args.caller_agent_id === "string" ? args.caller_agent_id.trim() : (typeof callerAgentId === "string" ? callerAgentId.trim() : "");
+  if (callerId) {
+    const callerAgent = agentRegistry.get(callerId);
+    if (callerAgent && callerAgent.teamId) {
+      const callerTeam = teamRegistry.get(callerAgent.teamId);
+      if (callerTeam && !callerTeam.enabled) {
+        return JSON.stringify({
+          ok: false,
+          code: "caller_team_disabled",
+          error: "caller_team_disabled",
+          message: `Caller agent ${callerAgent.name || callerId} is part of disabled team "${callerTeam.name}". Enable the team first.`,
+        });
+      }
+    }
+  }
+
+  if (agent.teamId) {
+    const agentTeam = teamRegistry.get(agent.teamId);
+    if (agentTeam && !agentTeam.enabled) {
+      return JSON.stringify({
+        ok: false,
+        code: "team_disabled",
+        error: "team_disabled",
+        message: `Agent ${agent.name || targetId} is part of disabled team "${agentTeam.name}". Enable the team first.`,
+      });
+    }
+  }
 
   const sessionKey = `agent:${targetId}:${MAIN_KEY}`;
   const history = getHistory(sessionKey);
@@ -923,6 +1424,10 @@ async function execDelegateTask(args) {
 
   emitSub("delta", { message: { role: "assistant", content: "…" } });
 
+  const throttledSubDelta = createThrottledDeltaEmitter((partial) => {
+    emitSub("delta", { message: { role: "assistant", content: partial } });
+  }, CHAT_STREAM_THROTTLE_MS);
+
   let responseText = "";
   try {
     let round = 0;
@@ -930,10 +1435,11 @@ async function execDelegateTask(args) {
       round++;
       const result = await streamOneTurn(messages, model, [SUBAGENT_SPAWN_TOOL], (partial) => {
         responseText = partial;
-        emitSub("delta", { message: { role: "assistant", content: partial } });
+        throttledSubDelta(partial);
       }, null);
 
       if (result.finishReason === "tool_calls" && result.toolCalls.length > 0) {
+        throttledSubDelta.flush();
         messages.push({
           role: "assistant",
           content: result.textContent || null,
@@ -958,10 +1464,13 @@ async function execDelegateTask(args) {
       break;
     }
 
+    throttledSubDelta.cancel();
+
     // Persist to sub-agent history
     if (agent.settings.continuity !== false) {
-      history.push({ role: "user", content: message });
-      history.push({ role: "assistant", content: responseText });
+      const nowMs = Date.now();
+      history.push({ role: "user", content: message, createdAt: nowMs, timestamp: nowMs });
+      history.push({ role: "assistant", content: responseText, createdAt: nowMs, timestamp: nowMs });
       saveHistoryToDisk();
     }
 
@@ -970,10 +1479,13 @@ async function execDelegateTask(args) {
     // Presence update for sub-agent session
     broadcastEvent({
       type: "event", event: "presence",
-      payload: { sessions: { recent: [{ key: sessionKey, updatedAt: Date.now() }],
-        byAgent: [{ agentId: targetId, recent: [{ key: sessionKey, updatedAt: Date.now() }] }] } },
+      payload: buildPresencePayload({
+        recent: [{ key: sessionKey, updatedAt: Date.now() }],
+        byAgent: [{ agentId: targetId, recent: [{ key: sessionKey, updatedAt: Date.now() }] }],
+      }),
     });
   } catch (err) {
+    throttledSubDelta.cancel();
     const message = sanitizeErrorMessage(err);
     emitSub("error", { errorMessage: message });
     return JSON.stringify({ ok: false, error: message });
@@ -1007,18 +1519,13 @@ function execConfigureAgent(args) {
   }
   if (typeof args.model === "string" && args.model.trim()) agent.settings.model = args.model.trim();
   saveAgentsToDisk();
+  mongoDb.upsertAgentRecord(agent).catch((err) => {
+    console.warn(`[hermes-adapter] Could not upsert configured agent ${targetId} to MongoDB:`, sanitizeErrorMessage(err));
+  });
   console.log(`[hermes-adapter] Configured agent: ${agent.name} (${targetId})`);
   broadcastEvent({
     type: "event", event: "presence",
-    payload: {
-      sessions: {
-        recent: [],
-        byAgent: [...agentRegistry.keys()].map((aid) => ({
-          agentId: aid,
-          recent: [],
-        })),
-      },
-    },
+    payload: buildPresencePayload(),
   });
   return JSON.stringify({ ok: true, agent_id: targetId, name: agent.name, role: agent.role, settings: agent.settings });
 }
@@ -1031,6 +1538,9 @@ function execDismissAgent(args) {
   agentRegistry.delete(targetId);
   clearHistory(`agent:${targetId}:${MAIN_KEY}`);
   saveAgentsToDisk();
+  mongoDb.deleteAgentRecord(targetId).catch((err) => {
+    console.warn(`[hermes-adapter] Could not delete dismissed agent ${targetId} from MongoDB:`, sanitizeErrorMessage(err));
+  });
   console.log(`[hermes-adapter] Dismissed agent: ${agent.name} (${targetId})`);
   return JSON.stringify({ ok: true, dismissed: targetId });
 }
@@ -1158,6 +1668,11 @@ const runAgentTurn = createRunAgentTurn({
 const teamManager = createTeamManager({
   getAgent: (id) => agentRegistry.get(id) || null,
   listAgents: () => [...agentRegistry.values()],
+  getTeam: (id) => teamRegistry.get(id) || null,
+  isTeamEnabled: (teamId) => {
+    const t = teamRegistry.get(teamId);
+    return t ? t.enabled !== false : true;
+  },
   runAgentTurn,
   broadcast: broadcastEvent,
   randomId,
@@ -1169,7 +1684,7 @@ async function executeToolCall(tc, callerAgentId, sendEvent) {
   switch (tc.name) {
     case "subagent_spawn":       return execSubagentSpawn(tc.args, callerAgentId);
     case "spawn_agent":          return execSpawnAgent(tc.args, sendEvent);
-    case "delegate_task":        return execDelegateTask(tc.args, sendEvent);
+    case "delegate_task":        return execDelegateTask(tc.args, sendEvent, callerAgentId);
     case "list_team":            return execListTeam();
     case "configure_agent":      return execConfigureAgent(tc.args);
     case "dismiss_agent":        return execDismissAgent(tc.args);
@@ -1186,7 +1701,24 @@ async function runAgenticLoop({ sessionKey, agentId, userMessage, model, tools, 
   const agent = agentRegistry.get(agentId);
   const systemMsg = buildSystemMessages(agentId, agent);
   const history = getHistory(sessionKey);
-  const contextHistory = (agent?.settings?.wipe) ? [] : [...history];
+
+  let contextHistory = [];
+  if (!agent?.settings?.wipe) {
+    const dbHistory = await mongoDb.getLatestMessages(sessionKey, 10);
+    if (dbHistory && dbHistory.length > 0) {
+      contextHistory = dbHistory.map((m) => ({ role: m.role, content: m.content }));
+      if (
+        contextHistory.length > 0 &&
+        contextHistory[contextHistory.length - 1].role === "user" &&
+        contextHistory[contextHistory.length - 1].content === userMessage
+      ) {
+        contextHistory = contextHistory.slice(0, -1);
+      }
+    } else {
+      contextHistory = history.slice(-10);
+    }
+  }
+
   let messages = [...systemMsg, ...contextHistory, { role: "user", content: userMessage }];
 
   let finalText = "";
@@ -1199,10 +1731,12 @@ async function runAgenticLoop({ sessionKey, agentId, userMessage, model, tools, 
     );
 
     if (finishReason === "tool_calls" && toolCalls.length > 0) {
+      if (typeof emitDelta?.flush === "function") emitDelta.flush();
       // Inform user that tools are being executed (brief status text)
       const toolNames = toolCalls.map((t) => t.name).join(", ");
       const statusText = textContent || `Executing: ${toolNames}…`;
       if (statusText) emitDelta(statusText);
+      if (typeof emitDelta?.flush === "function") emitDelta.flush();
 
       // Add assistant message with tool_calls to messages
       messages.push({
@@ -1232,8 +1766,9 @@ async function runAgenticLoop({ sessionKey, agentId, userMessage, model, tools, 
 
   // Persist to history
   if (agent?.settings?.continuity !== false) {
-    history.push({ role: "user", content: userMessage });
-    history.push({ role: "assistant", content: finalText });
+    const nowMs = Date.now();
+    history.push({ role: "user", content: userMessage, createdAt: nowMs, timestamp: nowMs });
+    history.push({ role: "assistant", content: finalText, createdAt: nowMs, timestamp: nowMs });
     saveHistoryToDisk();
   }
 
@@ -1258,12 +1793,29 @@ async function handleMethod(method, params, id, sendEvent) {
     // --- Agent management ---------------------------------------------------
 
     case "agents.list": {
+      try {
+        const dbAgents = await mongoDb.getAgentsFromDb();
+        if (Array.isArray(dbAgents) && dbAgents.length > 0) {
+          for (const a of dbAgents) {
+            if (!a || !a.id) continue;
+            const existing = agentRegistry.get(a.id);
+            agentRegistry.set(a.id, {
+              ...(existing || {}),
+              ...a,
+              settings: { ...(existing?.settings || {}), ...(a.settings || {}) },
+            });
+          }
+        }
+      } catch (err) {
+        console.warn("[hermes-adapter] Could not refresh agents from MongoDB in agents.list:", sanitizeErrorMessage(err));
+      }
       const allAgents = [...agentRegistry.values()].map((agent) => ({
         id: agent.id, name: agent.name, workspace: agent.workspace,
         identity: { name: agent.name, emoji: "🤖" },
         role: agent.role,
+        teamId: agent.teamId || null,
       }));
-      return resOk(id, { defaultId: AGENT_ID, mainKey: MAIN_KEY, agents: allAgents });
+      return resOk(id, { defaultId: AGENT_ID, mainKey: MAIN_KEY, agents: allAgents, teams: [...teamRegistry.values()] });
     }
 
     case "agents.create": {
@@ -1272,13 +1824,19 @@ async function handleMethod(method, params, id, sendEvent) {
       const newId = `${slug}-${randomId().slice(0, 6)}`;
       const workspace = (typeof p.workspace === "string" && p.workspace)
         ? p.workspace : `${HOME}/.hermes/workspace-${slug}`;
-      agentRegistry.set(newId, {
+      const newAgent = {
         id: newId, name: agentName, workspace,
         role: "", systemPrompt: `You are ${agentName}.`,
         settings: { wipe: false, continuity: true, model: HERMES_MODEL, mode: "yolo", yolo: true },
-      });
+      };
+      agentRegistry.set(newId, newAgent);
       try { fs.mkdirSync(workspace, { recursive: true }); } catch {}
       saveAgentsToDisk();
+      try {
+        await mongoDb.upsertAgentRecord(newAgent);
+      } catch (err) {
+        console.warn(`[hermes-adapter] Could not upsert agent ${newId} to MongoDB:`, sanitizeErrorMessage(err));
+      }
       return resOk(id, { agentId: newId, name: agentName, workspace });
     }
 
@@ -1288,6 +1846,11 @@ async function handleMethod(method, params, id, sendEvent) {
         agentRegistry.delete(delId);
         clearHistory(`agent:${delId}:${MAIN_KEY}`);
         saveAgentsToDisk();
+        try {
+          await mongoDb.deleteAgentRecord(delId);
+        } catch (err) {
+          console.warn(`[hermes-adapter] Could not delete agent ${delId} from MongoDB:`, sanitizeErrorMessage(err));
+        }
       }
       return resOk(id, { ok: true, removedBindings: 0 });
     }
@@ -1299,21 +1862,112 @@ async function handleMethod(method, params, id, sendEvent) {
         if (typeof p.name === "string" && p.name.trim()) existing.name = p.name.trim();
         if (typeof p.workspace === "string" && p.workspace.trim()) existing.workspace = p.workspace.trim();
         if (typeof p.role === "string") existing.role = p.role.trim();
+        if (typeof p.teamId === "string") existing.teamId = p.teamId.trim() || null;
         saveAgentsToDisk();
+        try {
+          await mongoDb.upsertAgentRecord(existing);
+        } catch (err) {
+          console.warn(`[hermes-adapter] Could not upsert updated agent ${updId} to MongoDB:`, sanitizeErrorMessage(err));
+        }
       }
       return resOk(id, { ok: true, removedBindings: 0 });
+    }
+
+    // --- Team management -----------------------------------------------------
+
+    case "teams.list": {
+      return resOk(id, { teams: [...teamRegistry.values()] });
+    }
+
+    case "teams.create": {
+      const teamName = (typeof p.name === "string" && p.name.trim()) ? p.name.trim() : "Team";
+      const teamSlug = teamName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+      const teamId = `team-${teamSlug}-${randomId().slice(0, 4)}`;
+      const team = { id: teamId, name: teamName, enabled: true, createdAt: new Date().toISOString() };
+      teamRegistry.set(teamId, team);
+      saveTeamsToDisk();
+      mongoDb.upsertTeam(team).catch(() => {});
+      broadcastEvent({ type: "event", event: "teams", payload: { teams: [...teamRegistry.values()] } });
+      return resOk(id, { team });
+    }
+
+    case "teams.update": {
+      const tid = typeof p.teamId === "string" ? p.teamId : "";
+      const team = teamRegistry.get(tid);
+      if (!team) return resErr(id, "not_found", `Team ${tid} not found`);
+      if (typeof p.name === "string" && p.name.trim()) team.name = p.name.trim();
+      if (typeof p.enabled === "boolean") team.enabled = p.enabled;
+      saveTeamsToDisk();
+      mongoDb.upsertTeam(team).catch(() => {});
+      broadcastEvent({ type: "event", event: "teams", payload: { teams: [...teamRegistry.values()] } });
+      return resOk(id, { team });
+    }
+
+    case "teams.delete": {
+      const dtid = typeof p.teamId === "string" ? p.teamId : "";
+      teamRegistry.delete(dtid);
+      for (const agent of agentRegistry.values()) {
+        if (agent.teamId === dtid) agent.teamId = null;
+      }
+      saveTeamsToDisk();
+      saveAgentsToDisk();
+      mongoDb.deleteTeam(dtid).catch(() => {});
+      broadcastEvent({ type: "event", event: "teams", payload: { teams: [...teamRegistry.values()] } });
+      return resOk(id, { ok: true });
+    }
+
+    case "teams.toggle": {
+      const ttid = typeof p.teamId === "string" ? p.teamId : "";
+      const tteam = teamRegistry.get(ttid);
+      if (!tteam) return resErr(id, "not_found", `Team ${ttid} not found`);
+      tteam.enabled = typeof p.enabled === "boolean" ? p.enabled : !tteam.enabled;
+      saveTeamsToDisk();
+      mongoDb.upsertTeam(tteam).catch(() => {});
+      broadcastEvent({ type: "event", event: "teams", payload: { teams: [...teamRegistry.values()] } });
+      broadcastEvent({ type: "event", event: "presence", payload: buildPresencePayload() });
+      return resOk(id, { team: tteam });
     }
 
     case "agents.files.get": {
       const aid = p.agentId || AGENT_ID;
       const name = p.name || "";
-      const result = readAgentBrainFile(aid, name);
+      const ws = getAgentWorkspace(aid);
+      const targetPath = path.join(ws, name);
+      let content = null;
+      let filePath = targetPath;
+      let missing = true;
+
+      // 1. Fetch from MongoDB first (database is primary source of truth)
+      try {
+        const dbFile = await mongoDb.getBrainFileFromDb(aid, name);
+        if (dbFile && typeof dbFile.content === "string") {
+          content = dbFile.content;
+          filePath = dbFile.filePath || dbFile.path || targetPath;
+          missing = false;
+          agentFiles.set(`${aid}/${name}`, content);
+        }
+      } catch (err) {
+        console.warn(`[hermes-adapter] Error getting brain file from MongoDB for ${aid}/${name}:`, sanitizeErrorMessage(err));
+      }
+
+      // 2. If not in DB, fallback to workspace disk file and sync to DB
+      if (missing) {
+        const diskResult = readAgentBrainFile(aid, name);
+        if (!diskResult.missing) {
+          content = diskResult.content;
+          filePath = diskResult.path;
+          missing = false;
+          agentFiles.set(`${aid}/${name}`, content);
+          mongoDb.upsertBrainFile(aid, name, content, filePath).catch(() => {});
+        }
+      }
+
       return resOk(id, {
-        workspace: result.workspace,
+        workspace: ws,
         file: {
-          content: result.content,
-          path: result.path,
-          missing: result.missing,
+          content: content !== null ? content : "",
+          path: filePath,
+          missing,
         },
       });
     }
@@ -1323,6 +1977,13 @@ async function handleMethod(method, params, id, sendEvent) {
       const name = p.name || "";
       const content = typeof p.content === "string" ? p.content : "";
       writeAgentBrainFileToDisk(aid, name, content);
+      const ws = getAgentWorkspace(aid);
+      const targetPath = path.join(ws, name);
+      try {
+        await mongoDb.upsertBrainFile(aid, name, content, targetPath);
+      } catch (err) {
+        console.warn(`[hermes-adapter] Could not upsert brain file ${aid}/${name} to MongoDB:`, sanitizeErrorMessage(err));
+      }
       return resOk(id, { ok: true });
     }
 
@@ -1339,13 +2000,34 @@ async function handleMethod(method, params, id, sendEvent) {
     // --- Sessions -----------------------------------------------------------
 
     case "sessions.list": {
+      try {
+        const dbSessions = await mongoDb.getSessionsFromDb();
+        if (Array.isArray(dbSessions)) {
+          for (const s of dbSessions) {
+            if (s && s.sessionKey) {
+              const cur = sessionSettings.get(s.sessionKey) || {};
+              sessionSettings.set(s.sessionKey, { ...cur, ...s });
+            }
+          }
+        }
+      } catch (err) {
+        console.warn("[hermes-adapter] Could not load sessions from MongoDB:", sanitizeErrorMessage(err));
+      }
       const sessions = [...agentRegistry.values()].map((agent) => {
         const sessionKey = `agent:${agent.id}:${MAIN_KEY}`;
         const history = getHistory(sessionKey);
         const settings = sessionSettings.get(sessionKey) || {};
+        let updatedAt = null;
+        if (history.length > 0) {
+          const ts = resolveMessageTimestamp(history[history.length - 1]);
+          if (ts > 0) updatedAt = ts;
+        }
+        if (!updatedAt) {
+          updatedAt = getSessionCreationTime(sessionKey, agent);
+        }
         return {
           key: sessionKey, agentId: agent.id,
-          updatedAt: history.length > 0 ? Date.now() : null,
+          updatedAt,
           displayName: "Main",
           origin: { label: agent.name, provider: "hermes" },
           model: settings.model || agent.settings?.model || HERMES_MODEL,
@@ -1363,16 +2045,26 @@ async function handleMethod(method, params, id, sendEvent) {
       const keys = Array.isArray(p.keys) ? p.keys : [];
       const limit = typeof p.limit === "number" ? p.limit : 8;
       const maxChars = typeof p.maxChars === "number" ? p.maxChars : 240;
-      const previews = keys.map((key) => {
-        const history = getHistory(key);
-        if (history.length === 0) return { key, status: "empty", items: [] };
-        const items = history.slice(-limit).map((msg) => ({
-          role: msg.role === "assistant" ? "assistant" : "user",
-          text: String(msg.content || "").slice(0, maxChars),
-          timestamp: Date.now(),
-        }));
-        return { key, status: "ok", items };
-      });
+      const previews = await Promise.all(
+        keys.map(async (key) => {
+          let history = getHistory(key);
+          if (history.length === 0) {
+            try {
+              const dbMsgs = await mongoDb.getLatestMessages(key, limit);
+              if (Array.isArray(dbMsgs) && dbMsgs.length > 0) {
+                history = dbMsgs;
+              }
+            } catch {}
+          }
+          if (history.length === 0) return { key, status: "empty", items: [] };
+          const items = history.slice(-limit).map((msg) => ({
+            role: msg.role === "assistant" ? "assistant" : "user",
+            text: String(msg.content || "").slice(0, maxChars),
+            timestamp: resolveMessageTimestamp(msg),
+          }));
+          return { key, status: "ok", items };
+        })
+      );
       return resOk(id, { ts: Date.now(), previews });
     }
 
@@ -1387,15 +2079,38 @@ async function handleMethod(method, params, id, sendEvent) {
       if (p.execAsk !== undefined) next.execAsk = p.execAsk;
       sessionSettings.set(key, next);
       saveSessionsToDisk();
+      try {
+        await mongoDb.upsertSessionRecord(key, next);
+      } catch (err) {
+        console.warn(`[hermes-adapter] Could not upsert session ${key} to MongoDB:`, sanitizeErrorMessage(err));
+      }
       const resolvedModel = await resolveHermesModel(next.model || HERMES_MODEL);
       return resOk(id, { ok: true, key, entry: { thinkingLevel: next.thinkingLevel },
         resolved: { model: resolvedModel, modelProvider: "hermes" } });
     }
 
     case "sessions.reset": {
-      const key = typeof p.key === "string" ? p.key : MAIN_SESSION_KEY;
+      const key = typeof p.key === "string" ? p.key : (typeof p.sessionKey === "string" ? p.sessionKey : MAIN_SESSION_KEY);
       clearHistory(key);
-      return resOk(id, { ok: true });
+      await mongoDb.deleteChatMessages(key);
+      try {
+        await mongoDb.deleteSessionRecord(key);
+      } catch (err) {
+        console.warn(`[hermes-adapter] Could not delete session ${key} from MongoDB:`, sanitizeErrorMessage(err));
+      }
+      return resOk(id, { ok: true, sessionKey: key });
+    }
+
+    case "chat.clear": {
+      const key = typeof p.sessionKey === "string" ? p.sessionKey : (typeof p.key === "string" ? p.key : MAIN_SESSION_KEY);
+      clearHistory(key);
+      await mongoDb.deleteChatMessages(key);
+      broadcastEvent({
+        type: "event",
+        event: "chat.cleared",
+        payload: { sessionKey: key }
+      });
+      return resOk(id, { ok: true, sessionKey: key });
     }
 
     // --- Chat ---------------------------------------------------------------
@@ -1412,12 +2127,28 @@ async function handleMethod(method, params, id, sendEvent) {
       const agent = agentRegistry.get(sessionAgentId);
       const isOrchestrator = sessionAgentId === AGENT_ID;
 
+      {
+        const sendAgent = agentRegistry.get(sessionAgentId);
+        if (sendAgent && sendAgent.teamId) {
+          const agentTeam = teamRegistry.get(sendAgent.teamId);
+          if (agentTeam && !agentTeam.enabled) {
+            return resErr(id, "team_disabled", `Agent ${sendAgent.name} is part of disabled team "${agentTeam.name}". Enable the team first.`);
+          }
+        }
+      }
+
+      await mongoDb.saveChatMessage({ sessionKey, agentId: sessionAgentId, role: "user", content: userMessage, runId });
+
       let aborted = false;
+      let onTextDelta = null;
       activeRuns.set(runId, {
         runId,
         sessionKey,
         agentId: sessionAgentId,
-        abort() { aborted = true; },
+        abort() {
+          aborted = true;
+          if (onTextDelta?.cancel) onTextDelta.cancel();
+        },
       });
       teamManager.markBusy(sessionAgentId, runId);
 
@@ -1431,9 +2162,9 @@ async function handleMethod(method, params, id, sendEvent) {
             payload: { runId, sessionKey, state, ...extra } });
         };
 
-        const onTextDelta = (partial) => {
+        onTextDelta = createThrottledDeltaEmitter((partial) => {
           if (!aborted) emitChat("delta", { message: { role: "assistant", content: partial } });
-        };
+        }, CHAT_STREAM_THROTTLE_MS);
 
         try {
           // Tool availability: every agent gets subagent_spawn; orchestrator gets full team tools
@@ -1445,19 +2176,27 @@ async function handleMethod(method, params, id, sendEvent) {
             abortCheck: () => aborted, sendEvent,
           });
 
+          onTextDelta.cancel();
+
           if (aborted) {
             emitChat("aborted", {});
           } else {
+            const finalContent = finalText;
+            await mongoDb.saveChatMessage({ sessionKey, agentId: sessionAgentId, role: "assistant", content: finalContent, runId });
             emitChat("final", { stopReason: "end_turn",
               message: { role: "assistant", content: finalText } });
             sendEvent({ type: "event", event: "presence", seq: seqCounter++,
-              payload: { sessions: { recent: [{ key: sessionKey, updatedAt: Date.now() }],
-                byAgent: [{ agentId: sessionAgentId, recent: [{ key: sessionKey, updatedAt: Date.now() }] }] } } });
+              payload: buildPresencePayload({
+                recent: [{ key: sessionKey, updatedAt: Date.now() }],
+                byAgent: [{ agentId: sessionAgentId, recent: [{ key: sessionKey, updatedAt: Date.now() }] }],
+              }) });
           }
         } catch (err) {
+          if (onTextDelta?.cancel) onTextDelta.cancel();
           if (!aborted) emitChat("error", { errorMessage: sanitizeErrorMessage(err) || "Hermes API error" });
           else emitChat("aborted", {});
         } finally {
+          if (onTextDelta?.cancel) onTextDelta.cancel();
           activeRuns.delete(runId);
           teamManager.clearBusy(sessionAgentId, runId);
         }
@@ -1490,7 +2229,10 @@ async function handleMethod(method, params, id, sendEvent) {
 
     case "chat.history": {
       const histKey = typeof p.sessionKey === "string" ? p.sessionKey : MAIN_SESSION_KEY;
-      return resOk(id, { sessionKey: histKey, messages: getHistory(histKey) });
+      const limit = typeof p.limit === "number" && p.limit > 0 ? p.limit : 10;
+      const dbMessages = await mongoDb.getLatestMessages(histKey, limit);
+      const messages = dbMessages !== null ? dbMessages : getHistory(histKey).slice(-limit);
+      return resOk(id, { sessionKey: histKey, messages });
     }
 
     case "agent.wait": {
@@ -1529,8 +2271,17 @@ async function handleMethod(method, params, id, sendEvent) {
 
     case "status": {
       const recent = [...agentRegistry.keys()].flatMap((aid) => {
-        const h = getHistory(`agent:${aid}:${MAIN_KEY}`);
-        return h.length > 0 ? [{ key: `agent:${aid}:${MAIN_KEY}`, updatedAt: Date.now() }] : [];
+        const sessionKey = `agent:${aid}:${MAIN_KEY}`;
+        const h = getHistory(sessionKey);
+        let updatedAt = null;
+        if (h.length > 0) {
+          const ts = resolveMessageTimestamp(h[h.length - 1]);
+          if (ts > 0) updatedAt = ts;
+        }
+        if (!updatedAt) {
+          updatedAt = getSessionCreationTime(sessionKey, agentRegistry.get(aid));
+        }
+        return updatedAt ? [{ key: sessionKey, updatedAt }] : [];
       });
       return resOk(id, { sessions: { recent,
         byAgent: [...agentRegistry.keys()].map((aid) => ({
@@ -1544,8 +2295,45 @@ async function handleMethod(method, params, id, sendEvent) {
 
     // --- Skills & models ----------------------------------------------------
 
-    case "skills.status":
-      return resOk(id, { skills: [] });
+    case "skills.status": {
+      const targetAgentId = (typeof p.agentId === "string" && p.agentId.trim()) ? p.agentId.trim() : AGENT_ID;
+      const ws = getAgentWorkspace(targetAgentId);
+      const managedSkillsDir = path.join(ws, "skills");
+      return resOk(id, {
+        workspaceDir: ws,
+        managedSkillsDir,
+        skills: [],
+      });
+    }
+
+    case "skills.writePackaged": {
+      const targetAgentId = (typeof p.agentId === "string" && p.agentId.trim()) ? p.agentId.trim() : AGENT_ID;
+      const ws = getAgentWorkspace(targetAgentId);
+      const skillKey = typeof p.skillKey === "string" ? p.skillKey.trim() : "";
+      const files = Array.isArray(p.files) ? p.files : [];
+      if (!skillKey) {
+        return resErr(id, "invalid_params", "skillKey is required.");
+      }
+      const targetSkillDir = path.join(ws, "skills", skillKey);
+      try {
+        fs.mkdirSync(targetSkillDir, { recursive: true });
+        for (const file of files) {
+          if (!file || typeof file.relativePath !== "string" || typeof file.content !== "string") continue;
+          const filePath = path.join(targetSkillDir, file.relativePath);
+          fs.mkdirSync(path.dirname(filePath), { recursive: true });
+          fs.writeFileSync(filePath, file.content, "utf8");
+        }
+        return resOk(id, { ok: true, skillKey, installedPath: targetSkillDir });
+      } catch (err) {
+        return resErr(id, "write_error", sanitizeErrorMessage(err));
+      }
+    }
+
+    case "skills.update":
+      return resOk(id, { ok: true, skillKey: p.skillKey });
+
+    case "skills.install":
+      return resOk(id, { ok: true, message: "installed", stdout: "", stderr: "", code: 0 });
 
     case "models.list":
       try {
@@ -1688,15 +2476,16 @@ function startAdapter() {
             type: "hello-ok", protocol: 3,
             adapterType: "hermes",
             features: { methods: ["agents.list","agents.create","agents.delete","agents.update",
+              "teams.list","teams.create","teams.update","teams.delete","teams.toggle",
               "sessions.list","sessions.preview","sessions.patch","sessions.reset",
-              "chat.send","chat.abort","chat.history","agent.wait",
+              "chat.send","chat.abort","chat.history","chat.clear","agent.wait",
               "status","config.get","config.set","config.patch",
               "agents.files.get","agents.files.set",
               "exec.approvals.get","exec.approvals.set","exec.approval.resolve",
               "wake","skills.status","models.list",
               "tasks.list",
               "cron.list","cron.add","cron.remove","cron.patch","cron.run"],
-              events: ["chat","presence","heartbeat","cron"] },
+              events: ["chat","presence","heartbeat","cron","chat.cleared","teams"] },
             snapshot: { health: { agents: allAgents, defaultAgentId: AGENT_ID },
               sessionDefaults: { mainKey: MAIN_KEY } },
             auth: { role: "operator", scopes: ["operator.admin","operator.approvals"] },
@@ -1744,7 +2533,33 @@ function startAdapter() {
   });
 }
 
-loadHistoryFromDisk();
-if (closeDanglingTurns(conversationHistory) > 0) saveHistoryToDisk();
-loadBrainSettingsFromDisk();
-startAdapter();
+if (require.main === module) {
+  (async () => {
+    loadHistoryFromDisk();
+    if (closeDanglingTurns(conversationHistory) > 0) saveHistoryToDisk();
+    try {
+      await loadBrainSettingsFromDisk();
+    } catch (err) {
+      console.warn("[hermes-adapter] Error synchronizing brain settings with MongoDB:", sanitizeErrorMessage(err));
+    }
+    startAdapter();
+  })();
+}
+
+module.exports = {
+  createThrottledDeltaEmitter,
+  CHAT_STREAM_THROTTLE_MS,
+  startAdapter,
+  handleMethod,
+  streamOneTurn,
+  execDelegateTask,
+  executeToolCall,
+  agentRegistry,
+  teamRegistry,
+  DEFAULT_TEAM_IT_ID,
+  DEFAULT_TEAM_IT_AGENT_IDS,
+  seedTeamItIfNeeded,
+  loadBrainSettingsFromDisk,
+  saveTeamsToDisk,
+  saveAgentsToDisk,
+};

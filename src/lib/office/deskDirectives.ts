@@ -6,7 +6,6 @@ import { stripUiMetadata } from "@/lib/text/message-extract";
 // regex checks across chat, office, or scene code.
 export type OfficeDeskDirective = "desk" | "release";
 export type OfficeGithubDirective = "github" | "release";
-export type OfficeGymDirective = "gym" | "release";
 export type OfficeQaDirective = "qa_lab" | "release";
 export type OfficeStandupDirective = "standup";
 export type OfficeCallPhase = "needs_message" | "ready_to_call";
@@ -25,12 +24,6 @@ export type OfficeIntentSnapshot = {
   normalized: string;
   desk: OfficeDeskDirective | null;
   github: OfficeGithubDirective | null;
-  gym:
-    | {
-        directive: OfficeGymDirective;
-        source: "manual" | "skill";
-      }
-    | null;
   qa: OfficeQaDirective | null;
   art: null;
   standup: OfficeStandupDirective | null;
@@ -151,65 +144,6 @@ const resolveOfficeInteractionDirectiveFromNormalized = (
   if (isGithubRelease) return { target: "github", action: "release" };
 
   return null;
-};
-
-const resolveOfficeGymSkillDirectiveFromNormalized = (
-  normalized: string,
-): OfficeGymDirective | null => {
-  const gymSkillReleasePatterns = [
-    /\bleave\s+(?:the\s+)?gym\b/,
-    /\bexit\s+(?:the\s+)?gym\b/,
-    /\bdone\s+(?:with\s+(?:the\s+)?)?(?:gym|skill(?:\s+building)?)\b/,
-    /\bstop\s+(?:working\s+on\s+)?skills?\b/,
-    /\bleave\s+the\s+skill(?:\s+building)?(?:\s+room)?\b/,
-  ];
-  if (gymSkillReleasePatterns.some((pattern) => pattern.test(normalized))) {
-    return "release";
-  }
-  const skillIntentPatterns = [
-    /\bskills?\b/,
-    /\bskills?\s+marketplace\b/,
-    /\bbuild\s+(?:another\s+)?skill\b/,
-    /\bcreate\s+(?:another\s+)?skill\b/,
-    /\bdevelop\s+(?:another\s+)?skill\b/,
-    /\binstall\s+(?:a\s+)?skill\b/,
-    /\benable\s+(?:a\s+)?skill\b/,
-    /\bsetup\s+(?:a\s+)?skill\b/,
-    /\bconfigure\s+(?:a\s+)?skill\b/,
-    /\bhermes\s+skill\b/,
-    /\bskill\s+for\s+hermes\b/,
-  ];
-  return skillIntentPatterns.some((pattern) => pattern.test(normalized))
-    ? "gym"
-    : null;
-};
-
-const resolveOfficeGymCommandDirectiveFromNormalized = (
-  normalized: string,
-): OfficeGymDirective | null => {
-  const gymCommandReleasePatterns = [
-    /\bleave\s+(?:the\s+)?gym\b/,
-    /\bexit\s+(?:the\s+)?gym\b/,
-    /\bdone\s+(?:with\s+(?:the\s+)?)?gym\b/,
-    /\bstop\s+gym(?:ning)?\b/,
-    /\bleave\s+skill(?:\s+building)?(?:\s+room)?\b/,
-  ];
-  if (gymCommandReleasePatterns.some((pattern) => pattern.test(normalized))) {
-    return "release";
-  }
-  const gymCommandPatterns = [
-    /\b(?:lets|let's)\s+go\s+to\s+the\s+gym\b/,
-    /\b(?:lets|let's)\s+go\s+to\s+gym\b/,
-    /\bgo\s+to\s+the\s+gym\b/,
-    /\bgo\s+to\s+gym\b/,
-    /\bhead\s+to\s+the\s+gym\b/,
-    /\bhead\s+to\s+gym\b/,
-    /\bgo\s+work\s+out\b/,
-    /\bgo\s+workout\b/,
-  ];
-  return gymCommandPatterns.some((pattern) => pattern.test(normalized))
-    ? "gym"
-    : null;
 };
 
 const resolveOfficeQaDirectiveFromNormalized = (
@@ -416,7 +350,6 @@ export const resolveOfficeIntentSnapshot = (
       normalized: "",
       desk: null,
       github: null,
-      gym: null,
       qa: null,
       art: null,
       standup: null,
@@ -431,25 +364,10 @@ export const resolveOfficeIntentSnapshot = (
   const interactionDirective = resolveOfficeInteractionDirectiveFromNormalized(
     normalized,
   );
-  const gymManualDirective = resolveOfficeGymCommandDirectiveFromNormalized(
-    normalized,
-  );
   const qaDirective = resolveOfficeQaDirectiveFromNormalized(normalized);
-  const gymSkillDirective = resolveOfficeGymSkillDirectiveFromNormalized(normalized);
   const standupDirective = resolveOfficeStandupDirectiveFromNormalized(normalized);
   const callDirective = resolveOfficeCallDirectiveFromNormalized(normalized);
   const textDirective = resolveOfficeTextDirectiveFromNormalized(normalized);
-  const gymDirective = gymManualDirective
-    ? {
-        directive: gymManualDirective,
-        source: "manual" as const,
-      }
-    : gymSkillDirective
-      ? {
-          directive: gymSkillDirective,
-          source: "skill" as const,
-        }
-      : null;
 
   return cacheIntentSnapshot(normalized, {
     normalized,
@@ -465,7 +383,6 @@ export const resolveOfficeIntentSnapshot = (
           ? "github"
           : "release"
         : null,
-    gym: gymDirective,
     qa: qaDirective,
     art: null,
     standup: standupDirective,
@@ -481,20 +398,6 @@ export const resolveOfficeDeskDirective = (
 export const resolveOfficeGithubDirective = (
   value: string | null | undefined,
 ): OfficeGithubDirective | null => resolveOfficeIntentSnapshot(value).github;
-
-export const resolveOfficeGymDirective = (
-  value: string | null | undefined,
-): OfficeGymDirective | null => {
-  const gymIntent = resolveOfficeIntentSnapshot(value).gym;
-  return gymIntent?.source === "skill" ? gymIntent.directive : null;
-};
-
-export const resolveOfficeGymCommandDirective = (
-  value: string | null | undefined,
-): OfficeGymDirective | null => {
-  const gymIntent = resolveOfficeIntentSnapshot(value).gym;
-  return gymIntent?.source === "manual" ? gymIntent.directive : null;
-};
 
 export const resolveOfficeQaDirective = (
   value: string | null | undefined,
@@ -516,7 +419,6 @@ const resolveTranscriptDirective = <
   TDirective extends
     | OfficeDeskDirective
     | OfficeGithubDirective
-    | OfficeGymDirective
     | OfficeQaDirective
     | OfficeStandupDirective,
 >(
@@ -573,28 +475,6 @@ export const reduceOfficeGithubHoldState = (params: {
   );
   if (transcriptDirective === "github") return true;
   if (transcriptDirective === "release") return false;
-
-  return params.currentHeld;
-};
-
-export const reduceOfficeGymHoldState = (params: {
-  currentHeld: boolean;
-  isAgentRunning: boolean;
-  lastUserMessage: string | null | undefined;
-  transcriptEntries: TranscriptEntry[] | undefined;
-}): boolean => {
-  if (!params.isAgentRunning) return false;
-
-  const latestMessageDirective = resolveOfficeGymDirective(
-    params.lastUserMessage,
-  );
-  if (latestMessageDirective === "gym") return true;
-
-  const transcriptDirective = resolveTranscriptDirective(
-    params.transcriptEntries,
-    resolveOfficeGymDirective,
-  );
-  if (transcriptDirective === "gym") return true;
 
   return params.currentHeld;
 };

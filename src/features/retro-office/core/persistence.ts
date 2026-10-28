@@ -1,7 +1,6 @@
 import {
   ATM_MIGRATION_KEY,
   BEDROOM_MIGRATION_KEY,
-  GYM_ROOM_MIGRATION_KEY,
   PHONE_BOOTH_MIGRATION_KEY,
   QA_LAB_MIGRATION_KEY,
   SMS_BOOTH_MIGRATION_KEY,
@@ -9,6 +8,11 @@ import {
   STORAGE_KEY,
 } from "@/features/retro-office/core/constants";
 import type { FurnitureItem } from "@/features/retro-office/core/types";
+
+const AGENT_POSITIONS_STORAGE_KEY = "hermes3d_agent_positions";
+
+export type AgentOfficePosition = { x: number; y: number };
+export type AgentOfficePositions = Record<string, AgentOfficePosition>;
 
 const resolveStorageKey = (key: string, namespace = "default") =>
   namespace === "default" ? key : `${key}:${namespace}`;
@@ -50,6 +54,54 @@ export const loadFurniture = (namespace = "default"): FurnitureItem[] | null => 
   }
 };
 
+export const resolveInitialAgentPosition = (
+  agentId: string,
+  status: "idle" | "working" | "error",
+  hasAssignedDesk: boolean,
+  savedPositions: AgentOfficePositions,
+  fallback: AgentOfficePosition,
+): AgentOfficePosition =>
+  status === "idle" && !hasAssignedDesk
+    ? (savedPositions[agentId] ?? fallback)
+    : fallback;
+
+export const loadAgentPositions = (namespace = "default"): AgentOfficePositions => {
+  try {
+    const raw = localStorage.getItem(resolveStorageKey(AGENT_POSITIONS_STORAGE_KEY, namespace));
+    if (!raw) return {};
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    return Object.fromEntries(
+      Object.entries(parsed).filter(([id, position]) =>
+        id.trim().length > 0 &&
+        position !== null &&
+        typeof position === "object" &&
+        Number.isFinite((position as AgentOfficePosition).x) &&
+        Number.isFinite((position as AgentOfficePosition).y),
+      ),
+    ) as AgentOfficePositions;
+  } catch {
+    return {};
+  }
+};
+
+export const saveAgentPositions = (
+  namespace: string,
+  positions: AgentOfficePositions,
+) => {
+  try {
+    const merged = loadAgentPositions(namespace);
+    for (const [id, position] of Object.entries(positions)) {
+      if (id.trim() && Number.isFinite(position?.x) && Number.isFinite(position?.y)) {
+        merged[id] = { x: position.x, y: position.y };
+      }
+    }
+    localStorage.setItem(resolveStorageKey(AGENT_POSITIONS_STORAGE_KEY, namespace), JSON.stringify(merged));
+  } catch {
+    /* ignore */
+  }
+};
+
 export const hasAtmMigrationApplied = (namespace = "default") =>
   hasStorageFlag(ATM_MIGRATION_KEY, namespace);
 
@@ -62,13 +114,6 @@ export const hasServerRoomMigrationApplied = (namespace = "default") =>
 
 export const markServerRoomMigrationApplied = (namespace = "default") => {
   markStorageFlag(SERVER_ROOM_MIGRATION_KEY, namespace);
-};
-
-export const hasGymRoomMigrationApplied = (namespace = "default") =>
-  hasStorageFlag(GYM_ROOM_MIGRATION_KEY, namespace);
-
-export const markGymRoomMigrationApplied = (namespace = "default") => {
-  markStorageFlag(GYM_ROOM_MIGRATION_KEY, namespace);
 };
 
 export const hasQaLabMigrationApplied = (namespace = "default") =>
