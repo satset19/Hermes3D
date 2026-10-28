@@ -15,15 +15,18 @@ import {
   type SummaryStatusSnapshot,
 } from "@/features/agents/state/runtimeEventBridge";
 import type { AgentStoreSeed } from "@/features/agents/state/store";
+import type { Team } from "@/features/teams/types";
 
 type AgentsListResult = {
   defaultId: string;
   mainKey: string;
   scope?: string;
+  teams?: Team[];
   agents: Array<{
     id: string;
     name?: string;
     role?: string;
+    teamId?: string | null;
     identity?: {
       name?: string;
       theme?: string;
@@ -176,12 +179,37 @@ const resolveDefaultModelForAgent = (
   return resolveConfiguredModelKey(raw, modelAliases);
 };
 
+export const normalizeTeams = (rawTeams: unknown): Team[] | undefined => {
+  if (!Array.isArray(rawTeams)) return undefined;
+  const teams: Team[] = [];
+  for (const item of rawTeams) {
+    if (!item || typeof item !== "object") continue;
+    const record = item as Record<string, unknown>;
+    const id = typeof record.id === "string" ? record.id.trim() : "";
+    const name = typeof record.name === "string" ? record.name.trim() : "";
+    if (!id || !name) continue;
+    const enabled = typeof record.enabled === "boolean" ? record.enabled : true;
+    const createdAt =
+      typeof record.createdAt === "string" && record.createdAt.trim()
+        ? record.createdAt.trim()
+        : undefined;
+    teams.push({
+      id,
+      name,
+      enabled,
+      ...(createdAt ? { createdAt } : {}),
+    });
+  }
+  return teams;
+};
+
 export type DeriveFleetHydrationInput = {
   gatewayUrl: string;
   configSnapshot: GatewayModelPolicySnapshot | null;
   settings: StudioSettings | StudioSettingsPublic | null;
   execApprovalsSnapshot: ExecApprovalsSnapshot | null;
   agentsResult: AgentsListResult;
+  teams?: Team[];
   mainSessionByAgentId: Map<string, SessionsListEntry | null>;
   statusSummary: SummaryStatusSnapshot | null;
   previewResult: SummaryPreviewSnapshot | null;
@@ -189,6 +217,7 @@ export type DeriveFleetHydrationInput = {
 
 export type DerivedHydrateAgentFleetResult = {
   seeds: AgentStoreSeed[];
+  teams?: Team[];
   sessionCreatedAgentIds: string[];
   sessionSettingsSyncedAgentIds: string[];
   summaryPatches: SummarySnapshotPatch[];
@@ -270,6 +299,7 @@ export const deriveHydrateAgentFleetResult = (
       identityName,
       sessionDisplayName,
       role: typeof agent.role === "string" && agent.role.trim() ? agent.role.trim() : null,
+      teamId: typeof agent.teamId === "string" && agent.teamId.trim() ? agent.teamId.trim() : null,
       sessionKey: buildAgentMainSessionKey(agent.id, mainKey),
       avatarSeed,
       avatarProfile,
@@ -335,8 +365,12 @@ export const deriveHydrateAgentFleetResult = (
     }
   }
 
+  const rawTeams = input.teams !== undefined ? input.teams : input.agentsResult.teams;
+  const teams = normalizeTeams(rawTeams);
+
   return {
     seeds,
+    teams,
     sessionCreatedAgentIds,
     sessionSettingsSyncedAgentIds,
     summaryPatches,

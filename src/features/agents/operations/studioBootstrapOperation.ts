@@ -13,6 +13,8 @@ import type {
   StudioSettingsPublic,
 } from "@/lib/studio/settings";
 
+import type { Team } from "@/features/teams/types";
+
 type GatewayClientLike = {
   call: (method: string, params: unknown) => Promise<unknown>;
 };
@@ -20,6 +22,7 @@ type GatewayClientLike = {
 export type StudioBootstrapLoadCommand =
   | { kind: "set-gateway-config-snapshot"; snapshot: GatewayModelPolicySnapshot }
   | { kind: "hydrate-agents"; seeds: AgentStoreSeed[]; initialSelectedAgentId: string | undefined }
+  | { kind: "hydrate-teams"; teams: Team[] }
   | { kind: "mark-session-created"; agentId: string; sessionSettingsSynced: boolean }
   | { kind: "apply-summary-patch"; agentId: string; patch: Partial<AgentState> }
   | { kind: "set-error"; message: string };
@@ -65,6 +68,13 @@ export async function runStudioBootstrapLoadOperation(params: {
       initialSelectedAgentId: selectionIntent.initialSelectedAgentId,
     });
 
+    if (Array.isArray(result.teams) && result.teams.length > 0) {
+      commands.push({
+        kind: "hydrate-teams",
+        teams: result.teams,
+      });
+    }
+
     const sessionSettingsSyncedAgentIds = new Set(result.sessionSettingsSyncedAgentIds);
     for (const agentId of result.sessionCreatedAgentIds) {
       commands.push({
@@ -93,12 +103,17 @@ export function executeStudioBootstrapLoadCommands(params: {
   commands: StudioBootstrapLoadCommand[];
   setGatewayConfigSnapshot: (snapshot: GatewayModelPolicySnapshot) => void;
   hydrateAgents: (agents: AgentStoreSeed[], selectedAgentId?: string) => void;
+  hydrateTeams?: (teams: Team[]) => void;
   dispatchUpdateAgent: (agentId: string, patch: Partial<AgentState>) => void;
   setError: (message: string) => void;
 }): void {
   for (const command of params.commands) {
     if (command.kind === "set-gateway-config-snapshot") {
       params.setGatewayConfigSnapshot(command.snapshot);
+      continue;
+    }
+    if (command.kind === "hydrate-teams") {
+      params.hydrateTeams?.(command.teams);
       continue;
     }
     if (command.kind === "hydrate-agents") {

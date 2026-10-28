@@ -10,6 +10,8 @@ export type OfficeAgentPresence = {
   name: string;
   state: OfficeAgentState;
   preferredDeskId?: string;
+  x?: number;
+  y?: number;
 };
 
 export type OfficePresenceSnapshot = {
@@ -77,12 +79,16 @@ export const normalizeOfficePresenceSnapshot = (
       typeof entry.preferredDeskId === "string" && entry.preferredDeskId.trim().length > 0
         ? entry.preferredDeskId.trim()
         : undefined;
+    const x = typeof entry.x === "number" ? entry.x : undefined;
+    const y = typeof entry.y === "number" ? entry.y : undefined;
     return [
       {
         agentId,
         name,
         state: normalizeOfficeAgentState(entry.state),
         ...(preferredDeskId ? { preferredDeskId } : {}),
+        ...(x !== undefined ? { x } : {}),
+        ...(y !== undefined ? { y } : {}),
       },
     ];
   });

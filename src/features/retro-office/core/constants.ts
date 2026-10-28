@@ -4,7 +4,6 @@ export const STORAGE_KEY = "hermes-office-furniture-v9";
 export const ATM_MIGRATION_KEY = "hermes-office-atm-migration-v1";
 export const SERVER_ROOM_MIGRATION_KEY =
   "hermes-office-server-room-migration-v3";
-export const GYM_ROOM_MIGRATION_KEY = "hermes-office-gym-room-migration-v3";
 export const QA_LAB_MIGRATION_KEY = "hermes-office-qa-lab-migration-v3";
 export const PHONE_BOOTH_MIGRATION_KEY = "hermes-office-phone-booth-migration-v1";
 export const SMS_BOOTH_MIGRATION_KEY = "hermes-office-sms-booth-migration-v1";
@@ -30,13 +29,22 @@ export const EAST_WING_ROOM_TOP_Y = 40;
 export const EAST_WING_ROOM_HEIGHT = 640;
 export const EAST_HALL_WIDTH = 56;
 export const EAST_WING_SPECIALTY_ROOM_WIDTH = 176;
-export const GYM_ROOM_X = EAST_WING_START_X + EAST_WING_SIDE_MARGIN;
-export const GYM_ROOM_WIDTH = EAST_WING_SPECIALTY_ROOM_WIDTH;
-export const GYM_ROOM_END_X = GYM_ROOM_X + GYM_ROOM_WIDTH;
-export const QA_LAB_X = GYM_ROOM_END_X + EAST_HALL_WIDTH;
+export const QA_LAB_X =
+  EAST_WING_START_X +
+  EAST_WING_SIDE_MARGIN +
+  EAST_WING_SPECIALTY_ROOM_WIDTH +
+  EAST_HALL_WIDTH;
 export const QA_LAB_WIDTH = EAST_WING_SPECIALTY_ROOM_WIDTH;
 export const QA_LAB_END_X = QA_LAB_X + QA_LAB_WIDTH;
 export const EAST_WING_DOOR_Y = 260;
+export const BEDROOM_ROOM_X = 1300;
+export const BEDROOM_ROOM_WIDTH = 450;
+export const BEDROOM_ROOM_END_X = 1750;
+export const BEDROOM_ROOM_TOP_Y = 760;
+export const BEDROOM_ROOM_HEIGHT = 200;
+export const BEDROOM_ROOM_BOTTOM_WALL_Y = 960;
+export const BEDROOM_DOOR_Y = 840;
+export const BEDROOM_MIGRATION_KEY = "hermes3d_office_bedroom_v2_annex";
 export const SCALE = 0.018;
 export const WORLD_W = CANVAS_W * SCALE;
 export const WORLD_H = CANVAS_H * SCALE;

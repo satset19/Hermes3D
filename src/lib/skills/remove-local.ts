@@ -27,8 +27,8 @@ const isPathInside = (root: string, candidate: string): boolean => {
   return resolvedCandidate.startsWith(rootPrefix);
 };
 
-const normalizeRequiredPath = (value: string, field: string): string => {
-  const trimmed = value.trim();
+const normalizeRequiredPath = (value: string | undefined | null, field: string): string => {
+  const trimmed = value?.trim();
   if (!trimmed) {
     throw new Error(`${field} is required.`);
   }
@@ -47,7 +47,7 @@ const resolveAllowedRoot = (params: {
 };
 
 export const removeSkillLocally = (params: SkillRemoveRequest): SkillRemoveResult => {
-  const skillKey = params.skillKey.trim();
+  const skillKey = params.skillKey?.trim();
   if (!skillKey) {
     throw new Error("skillKey is required.");
   }

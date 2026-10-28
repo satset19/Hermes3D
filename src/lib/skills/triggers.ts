@@ -151,7 +151,7 @@ export const resolveTriggeredSkillDefinition = (params: {
       if (!entry || entry.role !== "user") {
         continue;
       }
-      const text = entry.text.trim();
+      const text = typeof entry.text === "string" ? entry.text.trim() : "";
       if (text) {
         candidates.push(text);
       }

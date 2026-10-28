@@ -12,13 +12,8 @@ import {
 import type {
   FacingPoint,
   FurnitureItem,
-  GymWorkoutLocation,
   QaLabStationLocation,
 } from "@/features/retro-office/core/types";
-export {
-  GYM_DEFAULT_TARGET,
-  resolveGymRoute,
-} from "@/features/retro-office/core/navigation/gymRoute";
 export { getJanitorCleaningStops } from "@/features/retro-office/core/navigation/janitorStops";
 export {
   resolveSmsBoothRoute,
@@ -130,6 +125,111 @@ export const isNavPointFree = (grid: NavGrid, x: number, y: number): boolean => 
 };
 
 /**
+ * Returns true if a direct line segment between (x1, y1) and (x2, y2)
+ * does not cross any blocked navigation cells or cut corners of obstacles.
+ */
+export const isLineOfSightClear = (
+  grid: NavGrid,
+  x1: number,
+  y1: number,
+  x2: number,
+  y2: number,
+): boolean => {
+  if (!isNavPointFree(grid, x1, y1) || !isNavPointFree(grid, x2, y2)) {
+    return false;
+  }
+
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  const dist = Math.hypot(dx, dy);
+  if (dist === 0) return true;
+
+  // 1. Sub-cell point sampling along the segment (every 5px where cell is 25px)
+  const sampleSteps = Math.ceil(dist / 5);
+  for (let i = 1; i < sampleSteps; i += 1) {
+    const t = i / sampleSteps;
+    const px = x1 + t * dx;
+    const py = y1 + t * dy;
+    if (!isNavPointFree(grid, px, py)) {
+      return false;
+    }
+  }
+
+  // 2. Voxel traversal (Amanatides-Woo / DDA) to detect cell crossings and corner-cuts
+  let c = Math.floor(x1 / GRID_CELL);
+  let r = Math.floor(y1 / GRID_CELL);
+  const endC = Math.floor(x2 / GRID_CELL);
+  const endR = Math.floor(y2 / GRID_CELL);
+
+  if (c === endC && r === endR) {
+    return true;
+  }
+
+  const stepX = dx > 0 ? 1 : dx < 0 ? -1 : 0;
+  const stepY = dy > 0 ? 1 : dy < 0 ? -1 : 0;
+
+  const nextBoundaryX = stepX > 0 ? (c + 1) * GRID_CELL : c * GRID_CELL;
+  const nextBoundaryY = stepY > 0 ? (r + 1) * GRID_CELL : r * GRID_CELL;
+
+  let tMaxX = stepX !== 0 ? (nextBoundaryX - x1) / dx : Number.POSITIVE_INFINITY;
+  let tMaxY = stepY !== 0 ? (nextBoundaryY - y1) / dy : Number.POSITIVE_INFINITY;
+
+  const tDeltaX =
+    stepX !== 0 ? (GRID_CELL * stepX) / dx : Number.POSITIVE_INFINITY;
+  const tDeltaY =
+    stepY !== 0 ? (GRID_CELL * stepY) / dy : Number.POSITIVE_INFINITY;
+
+  const maxSteps = GRID_COLS + GRID_ROWS + 20;
+  let steps = 0;
+
+  while ((c !== endC || r !== endR) && steps < maxSteps) {
+    steps += 1;
+    if (Math.abs(tMaxX - tMaxY) < 1e-6) {
+      // Crossing a corner vertex between cells:
+      // Verify both orthogonal neighbors to prevent cutting through the corner
+      const orthoACol = c + stepX;
+      const orthoARow = r;
+      const orthoBCol = c;
+      const orthoBRow = r + stepY;
+      if (
+        orthoACol < 0 ||
+        orthoACol >= GRID_COLS ||
+        orthoARow < 0 ||
+        orthoARow >= GRID_ROWS ||
+        orthoBCol < 0 ||
+        orthoBCol >= GRID_COLS ||
+        orthoBRow < 0 ||
+        orthoBRow >= GRID_ROWS ||
+        grid[orthoARow * GRID_COLS + orthoACol] !== 0 ||
+        grid[orthoBRow * GRID_COLS + orthoBCol] !== 0
+      ) {
+        return false;
+      }
+      c += stepX;
+      r += stepY;
+      tMaxX += tDeltaX;
+      tMaxY += tDeltaY;
+    } else if (tMaxX < tMaxY) {
+      c += stepX;
+      tMaxX += tDeltaX;
+    } else {
+      r += stepY;
+      tMaxY += tDeltaY;
+    }
+
+    if (c < 0 || c >= GRID_COLS || r < 0 || r >= GRID_ROWS) {
+      return false;
+    }
+
+    if (grid[r * GRID_COLS + c] !== 0) {
+      return false;
+    }
+  }
+
+  return c === endC && r === endR;
+};
+
+/**
  * True when a body of `radius` centred on (x, y) clears every blocked cell.
  *
  * A cell is 25 units and an agent is 40 across, so a point-only check reports
@@ -225,9 +325,14 @@ export function astar(
   er = endFree.r;
   // Same nav cell: start and end are close enough that A* has no grid edges
   // to traverse. The destination is still reachable — return a single-waypoint
-  // path to the exact target pixel so the movement layer can make the final
-  // fine-grained adjustment instead of staying put.
-  if (sc === ec && sr === er) return [{ x: ex, y: ey }];
+  // path to the exact target pixel if line of sight is clear and target is free,
+  // otherwise return empty path so the agent never penetrates an obstacle.
+  if (sc === ec && sr === er) {
+    if (isNavPointFree(grid, ex, ey) && isLineOfSightClear(grid, sx, sy, ex, ey)) {
+      return [{ x: ex, y: ey }];
+    }
+    return [];
+  }
 
   const nodeCount = GRID_COLS * GRID_ROWS;
   const gCost = new Float32Array(nodeCount).fill(Infinity);
@@ -303,8 +408,13 @@ export function astar(
         node = parent[node];
       }
       path.reverse();
-      if (path.length) path[path.length - 1] = { x: ex, y: ey };
-      else path.push({ x: ex, y: ey });
+      if (path.length) {
+        if (isNavPointFree(grid, ex, ey)) {
+          path[path.length - 1] = { x: ex, y: ey };
+        }
+      } else if (isNavPointFree(grid, ex, ey)) {
+        path.push({ x: ex, y: ey });
+      }
       return path;
     }
 
@@ -349,10 +459,28 @@ export function astar(
   return [];
 }
 
-export const getDeskLocations = (items: FurnitureItem[]) =>
+export const getDeskLocations = (items: FurnitureItem[]): FacingPoint[] =>
   items
     .filter((item) => item.type === "desk_cubicle")
-    .map((item) => ({ x: item.x + 40, y: item.y - 5 }));
+    .map((desk) => {
+      const chair = items.find(
+        (i) =>
+          i.type === "chair" &&
+          Math.hypot(i.x - (desk.x + 20), i.y - (desk.y - 10)) < 60,
+      );
+      if (chair) {
+        return {
+          x: chair.x + 13,
+          y: chair.y + 10,
+          facing: Math.PI,
+        };
+      }
+      return {
+        x: desk.x + 33,
+        y: desk.y - 15,
+        facing: Math.PI,
+      };
+    });
 
 export const getMeetingSeatLocations = (items: FurnitureItem[]) => {
   // Meeting seats are inferred from chair placement in the conference area so standup
@@ -391,100 +519,6 @@ export const getMeetingSeatLocations = (items: FurnitureItem[]) => {
     };
   });
 };
-
-export const getGymWorkoutLocations = (
-  items: FurnitureItem[],
-): GymWorkoutLocation[] =>
-  items
-    .filter((item) =>
-      [
-        "treadmill",
-        "weight_bench",
-        "dumbbell_rack",
-        "exercise_bike",
-        "punching_bag",
-        "rowing_machine",
-        "kettlebell_rack",
-        "yoga_mat",
-      ].includes(item.type),
-    )
-    .sort((left, right) => left.y - right.y || left.x - right.x)
-    .map((item) => {
-      // Each workout target is an agent standing point plus a facing direction toward equipment.
-      const bounds = getItemBounds(item);
-      const equipmentCenterX = bounds.x + bounds.w / 2;
-      const equipmentCenterY = bounds.y + bounds.h / 2;
-      const facingTowardEquipment = (targetX: number, targetY: number) =>
-        Math.atan2(equipmentCenterX - targetX, equipmentCenterY - targetY);
-      if (item.type === "treadmill") {
-        const x = item.x + 35;
-        const y = item.y + 65;
-        return {
-          x,
-          y,
-          facing: facingTowardEquipment(x, y),
-          workoutStyle: "run",
-        };
-      }
-      if (item.type === "weight_bench") {
-        const x = item.x + 38;
-        const y = item.y + 20;
-        return {
-          x,
-          y,
-          facing: facingTowardEquipment(x, y),
-          workoutStyle: "lift",
-        };
-      }
-      if (item.type === "dumbbell_rack" || item.type === "kettlebell_rack") {
-        const x = item.x - 18;
-        const y = item.y + 14;
-        return {
-          x,
-          y,
-          facing: facingTowardEquipment(x, y),
-          workoutStyle: "lift",
-        };
-      }
-      if (item.type === "exercise_bike") {
-        const x = item.x + 18;
-        const y = item.y + 28;
-        return {
-          x,
-          y,
-          facing: facingTowardEquipment(x, y),
-          workoutStyle: "bike",
-        };
-      }
-      if (item.type === "rowing_machine") {
-        const x = item.x + 28;
-        const y = item.y + 16;
-        return {
-          x,
-          y,
-          facing: facingTowardEquipment(x, y),
-          workoutStyle: "row",
-        };
-      }
-      if (item.type === "yoga_mat") {
-        const x = item.x + 35;
-        const y = item.y + 15;
-        return {
-          x,
-          y,
-          facing: facingTowardEquipment(x, y),
-          workoutStyle: "stretch",
-        };
-      }
-      const x = item.x - 18;
-      const y = item.y + 14;
-      return {
-        x,
-        y,
-        facing: facingTowardEquipment(x, y),
-        workoutStyle: "box",
-      };
-    });
 
 export const getQaLabStations = (
   items: FurnitureItem[],

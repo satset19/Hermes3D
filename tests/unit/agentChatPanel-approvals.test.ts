@@ -139,12 +139,16 @@ describe("AgentChatPanel exec approvals", () => {
       })
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Allow once for exec approval approval-1" }));
-    fireEvent.click(screen.getByRole("button", { name: "Always allow for exec approval approval-1" }));
-    fireEvent.click(screen.getByRole("button", { name: "Deny exec approval approval-1" }));
+    const select = screen.getByTestId("exec-approval-select-approval-1");
+    expect(select).toBeInTheDocument();
 
+    fireEvent.change(select, { target: { value: "allow-once" } });
     expect(onResolveExecApproval).toHaveBeenNthCalledWith(1, "approval-1", "allow-once");
+
+    fireEvent.change(select, { target: { value: "allow-always" } });
     expect(onResolveExecApproval).toHaveBeenNthCalledWith(2, "approval-1", "allow-always");
+
+    fireEvent.change(select, { target: { value: "deny" } });
     expect(onResolveExecApproval).toHaveBeenNthCalledWith(3, "approval-1", "deny");
   });
 
@@ -169,8 +173,7 @@ describe("AgentChatPanel exec approvals", () => {
       })
     );
 
-    expect(screen.getByRole("button", { name: "Allow once for exec approval approval-1" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Always allow for exec approval approval-1" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Deny exec approval approval-1" })).toBeDisabled();
+    const select = screen.getByTestId("exec-approval-select-approval-1");
+    expect(select).toBeDisabled();
   });
 });

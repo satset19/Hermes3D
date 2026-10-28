@@ -60,6 +60,7 @@ type GatewayStatus = "disconnected" | "connecting" | "connected";
 type InteractionDispatchAction =
   | { type: "updateAgent"; agentId: string; patch: Partial<AgentState> }
   | { type: "appendOutput"; agentId: string; line: string }
+  | { type: "clearChat"; agentId: string }
   | { type: "enqueueQueuedMessage"; agentId: string; message: string }
   | { type: "removeQueuedMessage"; agentId: string; index: number }
   | { type: "shiftQueuedMessage"; agentId: string; expectedMessage?: string };
@@ -519,6 +520,35 @@ describe("useChatInteractionController", () => {
       type: "appendOutput",
       agentId: "agent-1",
       line: "New session failed: Missing session key for agent.",
+    });
+  });
+
+  it("calls chat.clear and dispatches clearChat on handleClearChat", async () => {
+    const ctx = renderController({
+      agents: [
+        createAgent({
+          agentId: "agent-1",
+          sessionKey: "agent:agent-1:main",
+          runId: "run-123",
+        }),
+      ],
+    });
+
+    await act(async () => {
+      await ctx.getValue().handleClearChat("agent-1");
+    });
+
+    expect(ctx.call).toHaveBeenCalledWith("chat.clear", {
+      sessionKey: "agent:agent-1:main",
+      key: "agent:agent-1:main",
+    });
+    expect(ctx.clearRunTracking).toHaveBeenCalledWith("run-123");
+    expect(ctx.clearHistoryInFlight).toHaveBeenCalledWith("agent:agent-1:main");
+    expect(ctx.clearSpecialUpdateMarker).toHaveBeenCalledWith("agent-1");
+    expect(ctx.clearSpecialLatestUpdateInFlight).toHaveBeenCalledWith("agent-1");
+    expect(ctx.dispatch).toHaveBeenCalledWith({
+      type: "clearChat",
+      agentId: "agent-1",
     });
   });
 

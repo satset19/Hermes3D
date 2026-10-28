@@ -424,6 +424,9 @@ export class GatewayBrowserClient {
   private connectSent = false;
   private connectTimer: number | null = null;
   private backoffMs = 800;
+  private helloReceived = false;
+  private pingTimer: ReturnType<typeof setInterval> | null = null;
+  private pingTimeoutTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(private opts: GatewayBrowserClientOptions) {}
 
@@ -441,6 +444,11 @@ export class GatewayBrowserClient {
 
   stop() {
     this.closed = true;
+    this.stopKeepalive();
+    if (this.connectTimer !== null) {
+      window.clearTimeout(this.connectTimer);
+      this.connectTimer = null;
+    }
     gatewayBrowserDebugLog("stop");
     this.ws?.close();
     this.ws = null;
@@ -453,6 +461,7 @@ export class GatewayBrowserClient {
 
   private connect() {
     if (this.closed) return;
+    this.helloReceived = false;
     gatewayBrowserDebugLog("connect:open-socket", { url: this.opts.url });
     this.ws = new WebSocket(this.opts.url);
     this.ws.onopen = () => {
@@ -461,6 +470,8 @@ export class GatewayBrowserClient {
     };
     this.ws.onmessage = (ev) => this.handleMessage(String(ev.data ?? ""));
     this.ws.onclose = (ev) => {
+      this.helloReceived = false;
+      this.stopKeepalive();
       const reason = String(ev.reason ?? "");
       gatewayBrowserDebugLog("socket:close", { code: ev.code, reason });
       this.ws = null;
@@ -475,10 +486,46 @@ export class GatewayBrowserClient {
 
   private scheduleReconnect() {
     if (this.closed) return;
+    this.stopKeepalive();
     const delay = this.backoffMs;
     this.backoffMs = Math.min(this.backoffMs * 1.7, 15_000);
     gatewayBrowserDebugLog("schedule-reconnect", { delay });
     window.setTimeout(() => this.connect(), delay);
+  }
+
+  private startKeepalive() {
+    this.stopKeepalive();
+    this.pingTimer = setInterval(() => {
+      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+      if (!this.helloReceived) return;
+      this.pingTimeoutTimer = setTimeout(() => {
+        gatewayBrowserDebugLog("ping:timeout");
+        this.ws?.close(4000, "ping_timeout");
+      }, 5000);
+
+      this.request("ping", {})
+        .then(() => {
+          if (this.pingTimeoutTimer) {
+            clearTimeout(this.pingTimeoutTimer);
+            this.pingTimeoutTimer = null;
+          }
+        })
+        .catch(() => {
+          gatewayBrowserDebugLog("ping:failed");
+          this.ws?.close(4001, "ping_failed");
+        });
+    }, 25_000);
+  }
+
+  private stopKeepalive() {
+    if (this.pingTimer) {
+      clearInterval(this.pingTimer);
+      this.pingTimer = null;
+    }
+    if (this.pingTimeoutTimer) {
+      clearTimeout(this.pingTimeoutTimer);
+      this.pingTimeoutTimer = null;
+    }
   }
 
   private flushPending(err: Error) {
@@ -592,6 +639,7 @@ export class GatewayBrowserClient {
 
     void this.request<GatewayHelloOk>("connect", params)
       .then((hello) => {
+        this.helloReceived = true;
         gatewayBrowserDebugLog("hello-ok", {
           protocol: hello?.protocol ?? null,
           hasAuthToken: Boolean(hello?.auth?.deviceToken),
@@ -606,6 +654,7 @@ export class GatewayBrowserClient {
           });
         }
         this.backoffMs = 800;
+        this.startKeepalive();
         this.opts.onHello?.(hello);
       })
       .catch((err) => {
@@ -716,7 +765,7 @@ export class GatewayBrowserClient {
       !this.opts.disableDeviceAuth &&
       typeof crypto !== "undefined" &&
       !!crypto.subtle;
-    const delayMs = expectChallenge ? 5_000 : 75;
+    const delayMs = expectChallenge ? 150 : 75;
     gatewayBrowserDebugLog("queue-connect", { delayMs });
     this.connectTimer = window.setTimeout(() => {
       void this.sendConnect();

@@ -1,11 +1,13 @@
 import { createElement } from "react";
-import { fireEvent, render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { TaskBoardView } from "@/features/office/tasks/TaskBoardView";
 import type { TaskBoardCard } from "@/features/office/tasks/types";
 import type { AgentState } from "@/features/agents/state/store";
 import type { CronJobSummary } from "@/lib/cron/types";
+import type { Team } from "@/features/teams/types";
+import { TeamStoreContext } from "@/features/teams/store";
 
 const createCard = (overrides: Partial<TaskBoardCard> = {}): TaskBoardCard => ({
   id: "task-1",
@@ -33,7 +35,7 @@ const createCard = (overrides: Partial<TaskBoardCard> = {}): TaskBoardCard => ({
   ...overrides,
 });
 
-const createAgent = (): AgentState => ({
+const createAgent = (overrides: Partial<AgentState> = {}): AgentState => ({
   agentId: "agent-1",
   name: "Agent One",
   sessionKey: "agent:agent-1:main",
@@ -66,6 +68,7 @@ const createAgent = (): AgentState => ({
   thinkingLevel: "medium",
   avatarSeed: "seed-1",
   avatarUrl: null,
+  ...overrides,
 });
 
 const createCronJob = (): CronJobSummary => ({
@@ -82,6 +85,10 @@ const createCronJob = (): CronJobSummary => ({
 });
 
 describe("TaskBoardView", () => {
+  afterEach(() => {
+    cleanup();
+  });
+
   it("routes task edits through callbacks", () => {
     const onCreateCard = vi.fn();
     const onMoveCard = vi.fn();
@@ -138,5 +145,177 @@ describe("TaskBoardView", () => {
     expect(onMoveCard).toHaveBeenCalledWith("task-1", "working");
     expect(onUpdateCard).toHaveBeenCalledWith("task-1", { assignedAgentId: "agent-1" });
     expect(onDeleteCard).toHaveBeenCalledWith("task-1");
+  });
+
+  it("filters out agents belonging to disabled teams from assignee options", () => {
+    const teams: Team[] = [
+      { id: "team-active", name: "Active Team", enabled: true },
+      { id: "team-disabled", name: "Disabled Team", enabled: false },
+    ];
+    const agentActive = createAgent({
+      agentId: "agent-active",
+      name: "Active Agent",
+      teamId: "team-active",
+    });
+    const agentDisabled = createAgent({
+      agentId: "agent-disabled",
+      name: "Disabled Agent",
+      teamId: "team-disabled",
+    });
+    const agentSolo = createAgent({
+      agentId: "agent-solo",
+      name: "Solo Agent",
+      teamId: null,
+    });
+    const selectedCard = createCard();
+
+    render(
+      createElement(TaskBoardView, {
+        title: "Kanban",
+        subtitle: "Track tasks.",
+        agents: [agentActive, agentDisabled, agentSolo],
+        teams,
+        cardsByStatus: {
+          inbox: [selectedCard],
+          scheduled: [],
+          working: [],
+          needs_attention: [],
+          done: [],
+        },
+        selectedCard,
+        activeRuns: [],
+        cronJobs: [],
+        cronLoading: false,
+        cronError: null,
+        onCreateCard: vi.fn(),
+        onMoveCard: vi.fn(),
+        onSelectCard: vi.fn(),
+        onUpdateCard: vi.fn(),
+        onDeleteCard: vi.fn(),
+        onRefreshCronJobs: vi.fn(),
+      })
+    );
+
+    const select = screen.getByLabelText("Assigned agent") as HTMLSelectElement;
+    const optionValues = Array.from(select.options).map((opt) => opt.value);
+
+    expect(optionValues).toContain("agent-active");
+    expect(optionValues).toContain("agent-solo");
+    expect(optionValues).not.toContain("agent-disabled");
+    expect(screen.queryByRole("option", { name: "Disabled Agent" })).not.toBeInTheDocument();
+  });
+
+  it("filters out disabled team agents when teams are provided via TeamStoreContext", () => {
+    const teams: Team[] = [
+      { id: "team-live", name: "Live Team", enabled: true },
+      { id: "team-offline", name: "Offline Team", enabled: false },
+    ];
+    const agentLive = createAgent({
+      agentId: "agent-live",
+      name: "Live Agent",
+      teamId: "team-live",
+    });
+    const agentOffline = createAgent({
+      agentId: "agent-offline",
+      name: "Offline Agent",
+      teamId: "team-offline",
+    });
+    const selectedCard = createCard();
+
+    render(
+      createElement(
+        TeamStoreContext.Provider,
+        {
+          value: {
+            state: { teams, loading: false },
+            hydrateTeams: vi.fn(),
+            updateTeam: vi.fn(),
+            removeTeam: vi.fn(),
+            addTeam: vi.fn(),
+          },
+        },
+        createElement(TaskBoardView, {
+          title: "Kanban",
+          subtitle: "Track tasks.",
+          agents: [agentLive, agentOffline],
+          cardsByStatus: {
+            inbox: [selectedCard],
+            scheduled: [],
+            working: [],
+            needs_attention: [],
+            done: [],
+          },
+          selectedCard,
+          activeRuns: [],
+          cronJobs: [],
+          cronLoading: false,
+          cronError: null,
+          onCreateCard: vi.fn(),
+          onMoveCard: vi.fn(),
+          onSelectCard: vi.fn(),
+          onUpdateCard: vi.fn(),
+          onDeleteCard: vi.fn(),
+          onRefreshCronJobs: vi.fn(),
+        })
+      )
+    );
+
+    const select = screen.getByLabelText("Assigned agent") as HTMLSelectElement;
+    const optionValues = Array.from(select.options).map((opt) => opt.value);
+
+    expect(optionValues).toContain("agent-live");
+    expect(optionValues).not.toContain("agent-offline");
+    expect(screen.queryByRole("option", { name: "Offline Agent" })).not.toBeInTheDocument();
+  });
+
+  it("restores disabled team agents to assignee options when team is re-enabled", () => {
+    const disabledTeams: Team[] = [
+      { id: "team-ops", name: "Ops Team", enabled: false },
+    ];
+    const enabledTeams: Team[] = [
+      { id: "team-ops", name: "Ops Team", enabled: true },
+    ];
+    const opsAgent = createAgent({
+      agentId: "agent-ops",
+      name: "Ops Agent",
+      teamId: "team-ops",
+    });
+    const selectedCard = createCard();
+
+    const props = {
+      title: "Kanban",
+      subtitle: "Track tasks.",
+      agents: [opsAgent],
+      teams: disabledTeams,
+      cardsByStatus: {
+        inbox: [selectedCard],
+        scheduled: [],
+        working: [],
+        needs_attention: [],
+        done: [],
+      },
+      selectedCard,
+      activeRuns: [],
+      cronJobs: [],
+      cronLoading: false,
+      cronError: null,
+      onCreateCard: vi.fn(),
+      onMoveCard: vi.fn(),
+      onSelectCard: vi.fn(),
+      onUpdateCard: vi.fn(),
+      onDeleteCard: vi.fn(),
+      onRefreshCronJobs: vi.fn(),
+    };
+
+    const { rerender } = render(createElement(TaskBoardView, props));
+
+    const selectDisabled = screen.getByLabelText("Assigned agent") as HTMLSelectElement;
+    expect(Array.from(selectDisabled.options).map((opt) => opt.value)).not.toContain("agent-ops");
+
+    rerender(createElement(TaskBoardView, { ...props, teams: enabledTeams }));
+
+    const selectEnabled = screen.getByLabelText("Assigned agent") as HTMLSelectElement;
+    expect(Array.from(selectEnabled.options).map((opt) => opt.value)).toContain("agent-ops");
+    expect(screen.getByRole("option", { name: "Ops Agent" })).toBeInTheDocument();
   });
 });

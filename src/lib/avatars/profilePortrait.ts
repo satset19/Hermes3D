@@ -1,10 +1,10 @@
+import { getAvatarBodyShape } from "./bodyShape";
 import type { AgentAvatarProfile } from "./profile";
 
 const AVATAR_BG = "#070b16";
 const EYE_COLOR = "#111827";
 const HEADSET_BAND = "#94a3b8";
 const HEADSET_PAD = "#475569";
-const MOUTH_COLOR = "#9c4a4a";
 
 const escapeXml = (value: string) =>
   value
@@ -67,6 +67,30 @@ const buildHairSvg = (profile: AgentAvatarProfile, hairColor: string) => {
         `<rect x="22" y="20" width="36" height="10" rx="4" fill="${hairColor}"/>`,
         `<circle cx="40" cy="15" r="6" fill="${hairColor}"/>`,
       ].join("");
+    case "long":
+      return [
+        `<g data-hair="long">`,
+        `<rect x="22" y="19" width="36" height="11" rx="4" fill="${hairColor}"/>`,
+        `<rect x="20" y="24" width="6" height="30" rx="3" fill="${hairColor}"/>`,
+        `<rect x="54" y="24" width="6" height="30" rx="3" fill="${hairColor}"/>`,
+        `</g>`,
+      ].join("");
+    case "ponytail":
+      return [
+        `<g data-hair="ponytail">`,
+        `<rect x="22" y="19" width="36" height="11" rx="4" fill="${hairColor}"/>`,
+        `<circle cx="58" cy="26" r="4" fill="${hairColor}"/>`,
+        `<rect x="56" y="26" width="6" height="18" rx="3" fill="${hairColor}"/>`,
+        `</g>`,
+      ].join("");
+    case "bob":
+      return [
+        `<g data-hair="bob">`,
+        `<rect x="22" y="19" width="36" height="12" rx="4" fill="${hairColor}"/>`,
+        `<rect x="20" y="24" width="6" height="18" rx="3" fill="${hairColor}"/>`,
+        `<rect x="54" y="24" width="6" height="18" rx="3" fill="${hairColor}"/>`,
+        `</g>`,
+      ].join("");
     default:
       return "";
   }
@@ -112,6 +136,7 @@ export const buildAgentAvatarPortraitSvg = (profile: AgentAvatarProfile): string
   const shirtShadow = blendHex(topColor, "#000000", 0.18);
   const faceShadow = blendHex(skinTone, "#000000", 0.12);
   const faceHighlight = blendHex(skinTone, "#ffffff", 0.16);
+  const shape = getAvatarBodyShape(profile.body.gender);
 
   return [
     `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 80 80" role="img" aria-label="${escapeXml(profile.seed)} avatar portrait">`,
@@ -130,7 +155,10 @@ export const buildAgentAvatarPortraitSvg = (profile: AgentAvatarProfile): string
     `<rect x="29" y="35" width="7" height="7" rx="1.5" fill="${EYE_COLOR}"/>`,
     `<rect x="44" y="35" width="7" height="7" rx="1.5" fill="${EYE_COLOR}"/>`,
     buildGlassesSvg(profile.accessories.glasses),
-    `<rect x="34" y="45" width="12" height="3" rx="1.5" fill="${MOUTH_COLOR}"/>`,
+    shape.showLashes
+      ? `<g data-lashes="true"><rect x="27" y="33" width="3" height="2" fill="${EYE_COLOR}"/><rect x="50" y="33" width="3" height="2" fill="${EYE_COLOR}"/></g>`
+      : "",
+    `<rect x="34" y="45" width="12" height="3" rx="1.5" fill="${shape.mouthColor}"/>`,
     `</svg>`,
   ].join("");
 };

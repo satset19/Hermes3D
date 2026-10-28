@@ -1,12 +1,11 @@
 /**
- * Tests for the skillGymHold logic inside reconcileOfficeAnimationTriggerState.
+ * Tests for skillGymHold handling in reconcileOfficeAnimationTriggerState.
  *
- * Key behaviour (issue #13 fix):
- *  - When a "gym" directive resolves → skillGymHoldByAgentId[agentId] = true.
- *  - When a "release" directive resolves → skillGymHoldByAgentId[agentId] is NOT set
- *    (the hold is cleared, mirroring the desk/github/qa release patterns).
- *  - When no gym directive resolves but a prior hold exists in next state → hold persists.
- *  - When no gym directive and no prior hold → agent has no hold entry.
+ * Gym directives are retired with the removal of the gym room.
+ * Key behaviour:
+ * - New messages or transcripts do not trigger new skillGymHold entries.
+ * - Existing holds in state persist across reconcile ticks for backward compatibility.
+ * - Agents without prior holds do not receive hold entries.
  */
 import { describe, expect, it } from "vitest";
 
@@ -94,10 +93,8 @@ const makeTranscriptEntry = (params: {
 // Tests
 // ---------------------------------------------------------------------------
 
-describe("reconcileOfficeAnimationTriggerState – skillGym hold (issue #13)", () => {
-  it("sets skillGymHoldByAgentId to true when a 'gym' directive exists", () => {
-    // The agent's lastUserMessage triggers a gym-skill directive.
-    // A "gym" directive should unconditionally set the hold.
+describe("reconcileOfficeAnimationTriggerState - skillGym hold", () => {
+  it("does not set skillGymHoldByAgentId for skill messages after gym directive retirement", () => {
     const agent = makeAgent({
       agentId: "skill",
       name: "Skill",
@@ -111,11 +108,10 @@ describe("reconcileOfficeAnimationTriggerState – skillGym hold (issue #13)", (
       nowMs: 1_000,
     });
 
-    expect(state.skillGymHoldByAgentId["skill"]).toBe(true);
+    expect(state.skillGymHoldByAgentId["skill"]).toBeFalsy();
   });
 
-  it("sets skillGymHoldByAgentId via transcript entry when no lastUserMessage directive", () => {
-    // A gym directive embedded in the transcript should also trigger the hold.
+  it("does not set skillGymHoldByAgentId via transcript entry after gym directive retirement", () => {
     const sessionKey = "agent:skill:main";
     const agent = makeAgent({
       agentId: "skill",
@@ -139,12 +135,10 @@ describe("reconcileOfficeAnimationTriggerState – skillGym hold (issue #13)", (
       nowMs: 1_000,
     });
 
-    expect(state.skillGymHoldByAgentId["skill"]).toBe(true);
+    expect(state.skillGymHoldByAgentId["skill"]).toBeFalsy();
   });
 
   it("persists an existing hold when no new gym directive is present", () => {
-    // When there is no gym directive but a prior hold was set (e.g. from a previous
-    // reconciliation cycle), the hold must be preserved so the animation continues.
     const priorState = {
       ...createOfficeAnimationTriggerState(),
       skillGymHoldByAgentId: { "skill": true },
@@ -154,7 +148,7 @@ describe("reconcileOfficeAnimationTriggerState – skillGym hold (issue #13)", (
       agentId: "skill",
       name: "Skill",
       sessionKey: "agent:skill:main",
-      lastUserMessage: "How is the weather?", // no gym intent
+      lastUserMessage: "How is the weather?",
     });
 
     const state = reconcileOfficeAnimationTriggerState({
@@ -163,12 +157,10 @@ describe("reconcileOfficeAnimationTriggerState – skillGym hold (issue #13)", (
       nowMs: 2_000,
     });
 
-    // The hold should carry forward.
     expect(state.skillGymHoldByAgentId["skill"]).toBe(true);
   });
 
   it("does NOT add a hold entry when no gym directive and no previous hold exists", () => {
-    // Agent has a completely unrelated message — no hold should be introduced.
     const agent = makeAgent({
       agentId: "coder",
       name: "Coder",
@@ -182,23 +174,22 @@ describe("reconcileOfficeAnimationTriggerState – skillGym hold (issue #13)", (
       nowMs: 1_000,
     });
 
-    // The key should either be absent or explicitly falsy — never true.
     expect(state.skillGymHoldByAgentId["coder"]).toBeFalsy();
   });
 
-  it("handles multiple agents independently — only gym-directive agents get a hold", () => {
+  it("handles multiple agents without setting new gym holds", () => {
     const agents = [
       makeAgent({
         agentId: "skill",
         name: "Skill",
         sessionKey: "agent:skill:main",
-        lastUserMessage: "Enable a skill for Hermes.", // gym intent
+        lastUserMessage: "Enable a skill for Hermes.",
       }),
       makeAgent({
         agentId: "main",
         name: "Main",
         sessionKey: "agent:main:main",
-        lastUserMessage: "Check the logs.", // no gym intent
+        lastUserMessage: "Check the logs.",
       }),
     ];
 
@@ -208,19 +199,11 @@ describe("reconcileOfficeAnimationTriggerState – skillGym hold (issue #13)", (
       nowMs: 1_000,
     });
 
-    expect(state.skillGymHoldByAgentId["skill"]).toBe(true);
+    expect(state.skillGymHoldByAgentId["skill"]).toBeFalsy();
     expect(state.skillGymHoldByAgentId["main"]).toBeFalsy();
   });
 
   it("does NOT set skillGymHoldByAgentId when the latest message has no gym-skill directive", () => {
-    // A release phrase (e.g. "leave the gym") resolves through the *manual/command* gym
-    // path (source: "manual"), not the skill path (source: "skill") that
-    // reconcileOfficeAnimationTriggerState tracks via resolveOfficeGymDirective.
-    // The skill-source resolver correctly returns null for such messages, so the hold
-    // is neither set nor preserved via the skill-directive branch.
-    //
-    // Release of the gym hold for the *manual* path is handled downstream in
-    // buildOfficeAnimationState → reduceOfficeGymHoldState, which is not under test here.
     const agent = makeAgent({
       agentId: "skill",
       name: "Skill",
@@ -228,14 +211,12 @@ describe("reconcileOfficeAnimationTriggerState – skillGym hold (issue #13)", (
       lastUserMessage: "Leave the gym.",
     });
 
-    // No prior hold in state.
     const state = reconcileOfficeAnimationTriggerState({
       state: createOfficeAnimationTriggerState(),
       agents: [agent],
       nowMs: 1_000,
     });
 
-    // With no prior hold and no skill-source gym directive, the hold must remain absent.
     expect(state.skillGymHoldByAgentId["skill"]).toBeFalsy();
   });
 });

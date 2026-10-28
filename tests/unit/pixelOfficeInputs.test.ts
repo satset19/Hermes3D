@@ -21,7 +21,6 @@ const emptyAnimationState = (): OfficeAnimationState => ({
   danceUntilByAgentId: {},
   deskHoldByAgentId: {},
   githubHoldByAgentId: {},
-  gymHoldByAgentId: {},
   jukeboxHoldByAgentId: {},
   manualGymUntilByAgentId: {},
   pendingStandupRequest: null,
@@ -58,7 +57,7 @@ describe("buildPixelAgentInputs", () => {
   it("prioritizes the phone booth hold over the gym hold", () => {
     const state = emptyAnimationState();
     state.phoneBoothHoldByAgentId = { a: true };
-    state.gymHoldByAgentId = { a: true };
+    state.skillGymHoldByAgentId = { a: true };
     const [input] = buildPixelAgentInputs({
       agents: [agent("a")],
       animationState: state,
@@ -70,7 +69,6 @@ describe("buildPixelAgentInputs", () => {
   it("maps each hold kind to its station", () => {
     const cases: Array<[Partial<OfficeAnimationState>, string]> = [
       [{ smsBoothHoldByAgentId: { a: true } }, "sms_booth"],
-      [{ gymHoldByAgentId: { a: true } }, "gym"],
       [{ skillGymHoldByAgentId: { a: true } }, "gym"],
       [{ manualGymUntilByAgentId: { a: 2_000 } }, "gym"],
       [{ qaHoldByAgentId: { a: true } }, "qa_lab"],

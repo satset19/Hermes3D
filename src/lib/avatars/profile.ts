@@ -1,6 +1,14 @@
-export type AgentAvatarHairStyle = "short" | "parted" | "spiky" | "bun";
+export type AgentAvatarGender = "male" | "female";
+export type AgentAvatarHairStyle =
+  | "short"
+  | "parted"
+  | "spiky"
+  | "bun"
+  | "long"
+  | "ponytail"
+  | "bob";
 export type AgentAvatarTopStyle = "tee" | "hoodie" | "jacket";
-export type AgentAvatarBottomStyle = "pants" | "shorts" | "cuffed";
+export type AgentAvatarBottomStyle = "pants" | "shorts" | "cuffed" | "skirt";
 export type AgentAvatarHatStyle = "none" | "cap" | "beanie";
 
 export type AgentAvatarProfile = {
@@ -8,6 +16,7 @@ export type AgentAvatarProfile = {
   seed: string;
   body: {
     skinTone: string;
+    gender: AgentAvatarGender;
   };
   hair: {
     style: AgentAvatarHairStyle;
@@ -26,6 +35,8 @@ export type AgentAvatarProfile = {
     hatStyle: AgentAvatarHatStyle;
     backpack: boolean;
   };
+  imageUrl?: string | null;
+  scale?: number;
 };
 
 type ColorOption = {
@@ -48,11 +59,19 @@ export const AGENT_AVATAR_SKIN_TONE_OPTIONS: ColorOption[] = [
   { id: "rich", label: "Rich", color: "#5d3a24" },
 ];
 
+export const AGENT_AVATAR_GENDER_OPTIONS: EnumOption<AgentAvatarGender>[] = [
+  { id: "male", label: "Male" },
+  { id: "female", label: "Female" },
+];
+
 export const AGENT_AVATAR_HAIR_STYLE_OPTIONS: EnumOption<AgentAvatarHairStyle>[] = [
   { id: "short", label: "Short" },
   { id: "parted", label: "Parted" },
   { id: "spiky", label: "Spiky" },
   { id: "bun", label: "Bun" },
+  { id: "long", label: "Long" },
+  { id: "ponytail", label: "Ponytail" },
+  { id: "bob", label: "Bob" },
 ];
 
 export const AGENT_AVATAR_HAIR_COLOR_OPTIONS: ColorOption[] = [
@@ -76,6 +95,7 @@ export const AGENT_AVATAR_BOTTOM_STYLE_OPTIONS: EnumOption<AgentAvatarBottomStyl
   { id: "pants", label: "Pants" },
   { id: "shorts", label: "Shorts" },
   { id: "cuffed", label: "Cuffed" },
+  { id: "skirt", label: "Skirt" },
 ];
 
 export const AGENT_AVATAR_HAT_STYLE_OPTIONS: EnumOption<AgentAvatarHatStyle>[] = [
@@ -104,10 +124,31 @@ export const AGENT_AVATAR_SHOE_COLOR_OPTIONS: ColorOption[] = [
 
 const AGENT_AVATAR_VERSION = 1 as const;
 
+const pickOptions = <T extends string>(options: EnumOption<T>[], ids: readonly T[]) =>
+  ids.map((id) => options.find((option) => option.id === id)!);
+
+// Male pools mirror the original option lists so existing seeds keep their look.
+const SEED_HAIR_POOL: Record<AgentAvatarGender, EnumOption<AgentAvatarHairStyle>[]> = {
+  male: pickOptions(AGENT_AVATAR_HAIR_STYLE_OPTIONS, ["short", "parted", "spiky", "bun"]),
+  female: pickOptions(AGENT_AVATAR_HAIR_STYLE_OPTIONS, ["long", "ponytail", "bob", "bun"]),
+};
+
+const SEED_BOTTOM_POOL: Record<AgentAvatarGender, EnumOption<AgentAvatarBottomStyle>[]> = {
+  male: pickOptions(AGENT_AVATAR_BOTTOM_STYLE_OPTIONS, ["pants", "shorts", "cuffed"]),
+  female: pickOptions(AGENT_AVATAR_BOTTOM_STYLE_OPTIONS, ["pants", "cuffed", "skirt"]),
+};
+
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   Boolean(value && typeof value === "object" && !Array.isArray(value));
 
 const coerceString = (value: unknown) => (typeof value === "string" ? value.trim() : "");
+
+const resolveImageUrl = (value: unknown): string | null => {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  return trimmed.startsWith("/avatars/") ? trimmed : null;
+};
 
 const hashSeed = (seed: string) => {
   let hash = 2166136261;
@@ -123,6 +164,9 @@ const pick = <T,>(values: readonly T[], index: number) => values[index % values.
 const resolveColor = (value: unknown, options: ColorOption[], fallback: string) => {
   const color = coerceString(value).toLowerCase();
   if (!color) return fallback;
+  if (/^#[0-9a-f]{3}$/i.test(color) || /^#[0-9a-f]{6}$/i.test(color)) {
+    return color;
+  }
   const option =
     options.find((entry) => entry.id === color) ??
     options.find((entry) => entry.color.toLowerCase() === color);
@@ -143,11 +187,12 @@ export const createAgentAvatarProfileFromSeed = (seed: string): AgentAvatarProfi
   const normalizedSeed = seed.trim() || "agent";
   const hash = hashSeed(normalizedSeed);
   const skinTone = pick(AGENT_AVATAR_SKIN_TONE_OPTIONS, hash).color;
-  const hairStyle = pick(AGENT_AVATAR_HAIR_STYLE_OPTIONS, hash >>> 3).id;
+  const gender: AgentAvatarGender = (hash >>> 22) % 2 === 1 ? "female" : "male";
+  const hairStyle = pick(SEED_HAIR_POOL[gender], hash >>> 3).id;
   const hairColor = pick(AGENT_AVATAR_HAIR_COLOR_OPTIONS, hash >>> 5).color;
   const topStyle = pick(AGENT_AVATAR_TOP_STYLE_OPTIONS, hash >>> 7).id;
   const topColor = pick(AGENT_AVATAR_CLOTHING_COLOR_OPTIONS, hash >>> 9).color;
-  const bottomStyle = pick(AGENT_AVATAR_BOTTOM_STYLE_OPTIONS, hash >>> 11).id;
+  const bottomStyle = pick(SEED_BOTTOM_POOL[gender], hash >>> 11).id;
   const bottomColor = pick(AGENT_AVATAR_CLOTHING_COLOR_OPTIONS, hash >>> 13).color;
   const shoesColor = pick(AGENT_AVATAR_SHOE_COLOR_OPTIONS, hash >>> 15).color;
   const hatStyle = pick(AGENT_AVATAR_HAT_STYLE_OPTIONS, hash >>> 17).id;
@@ -157,6 +202,7 @@ export const createAgentAvatarProfileFromSeed = (seed: string): AgentAvatarProfi
     seed: normalizedSeed,
     body: {
       skinTone,
+      gender,
     },
     hair: {
       style: hairStyle,
@@ -175,6 +221,8 @@ export const createAgentAvatarProfileFromSeed = (seed: string): AgentAvatarProfi
       hatStyle,
       backpack: Boolean((hash >>> 21) % 2),
     },
+    imageUrl: null,
+    scale: 1.0,
   };
 };
 
@@ -209,6 +257,7 @@ export const normalizeAgentAvatarProfile = (
         AGENT_AVATAR_SKIN_TONE_OPTIONS,
         baseProfile.body.skinTone,
       ),
+      gender: resolveEnumOption(body.gender, AGENT_AVATAR_GENDER_OPTIONS, "male"),
     },
     hair: {
       style: resolveEnumOption(
@@ -268,5 +317,10 @@ export const normalizeAgentAvatarProfile = (
           ? accessories.backpack
           : baseProfile.accessories.backpack,
     },
+    imageUrl: resolveImageUrl(value.imageUrl),
+    scale:
+      typeof value.scale === "number" && !Number.isNaN(value.scale)
+        ? Math.min(1.5, Math.max(0.7, value.scale))
+        : 1.0,
   };
 };

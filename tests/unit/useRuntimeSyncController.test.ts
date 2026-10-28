@@ -244,6 +244,47 @@ describe("useRuntimeSyncController", () => {
     expect(mockedRunHistorySyncOperation).toHaveBeenCalledTimes(2);
   });
 
+  it("suppresses focused history polling during active streaming when connected", async () => {
+    const ctx = renderController({
+      agents: [
+        createAgent({
+          agentId: "agent-1",
+          status: "running",
+          historyLoadedAt: 1234,
+          streamText: "streaming chunk...",
+        }),
+      ],
+      focusedAgentId: "agent-1",
+      focusedAgentRunning: true,
+      status: "connected",
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(mockedRunHistorySyncOperation).toHaveBeenCalledTimes(0);
+
+    await vi.advanceTimersByTimeAsync(9000);
+    expect(mockedRunHistorySyncOperation).toHaveBeenCalledTimes(0);
+
+    ctx.rerenderWith({
+      agents: [
+        createAgent({
+          agentId: "agent-1",
+          status: "running",
+          historyLoadedAt: 1234,
+          streamText: null,
+        }),
+      ],
+      focusedAgentId: "agent-1",
+      focusedAgentRunning: true,
+      status: "connected",
+    });
+
+    await vi.advanceTimersByTimeAsync(4500);
+    expect(mockedRunHistorySyncOperation).toHaveBeenCalledTimes(1);
+  });
+
   it("bootstraps history only for connected sessions missing loaded history", async () => {
     renderController({
       status: "connected",

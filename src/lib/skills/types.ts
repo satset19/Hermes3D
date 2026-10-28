@@ -107,24 +107,24 @@ export type PackagedSkillInstallResult = {
   skillKey: string;
 };
 
-const resolveAgentId = (agentId: string): string => {
-  const trimmed = agentId.trim();
+const resolveAgentId = (agentId: string | undefined | null): string => {
+  const trimmed = agentId?.trim();
   if (!trimmed) {
     throw new Error("Agent id is required to load skill status.");
   }
   return trimmed;
 };
 
-const resolveRequiredValue = (value: string, message: string): string => {
-  const trimmed = value.trim();
+const resolveRequiredValue = (value: string | undefined | null, message: string): string => {
+  const trimmed = value?.trim();
   if (!trimmed) {
     throw new Error(message);
   }
   return trimmed;
 };
 
-const isLikelyRootWorkspace = (workspaceDir: string): boolean => {
-  const normalized = workspaceDir.trim().replace(/[\\/]+$/, "");
+const isLikelyRootWorkspace = (workspaceDir: string | undefined | null): boolean => {
+  const normalized = workspaceDir?.trim().replace(/[\\/]+$/, "") ?? "";
   if (!normalized) return false;
   return /[\\/]workspace$/i.test(normalized);
 };
@@ -172,7 +172,7 @@ export const loadAgentSkillStatus = async (
     agentId: resolvedAgentId,
   });
   const workspaceDir = report.workspaceDir?.trim() ?? "";
-  if (!workspaceDir || !isLikelyRootWorkspace(workspaceDir)) {
+  if (workspaceDir && !isLikelyRootWorkspace(workspaceDir)) {
     return report;
   }
   const recoveredWorkspace = await resolveWorkspaceFromAgentFiles(
@@ -185,6 +185,7 @@ export const loadAgentSkillStatus = async (
   return {
     ...report,
     workspaceDir: recoveredWorkspace,
+    managedSkillsDir: report.managedSkillsDir?.trim() || `${recoveredWorkspace}/skills`,
   };
 };
 

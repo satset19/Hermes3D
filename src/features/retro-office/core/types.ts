@@ -9,6 +9,7 @@ export type OfficeAgent = {
   color: string;
   item: string;
   avatarProfile?: AgentAvatarProfile | null;
+  teamId?: string | null;
 };
 
 export type JanitorTool = "broom" | "vacuum" | "floor_scrubber";
@@ -68,9 +69,12 @@ export type RenderAgent = SceneActor & {
   qaLabStage?: "door_outer" | "door_inner" | "station";
   qaLabStationType?: QaLabStationType;
   workoutStyle?: "run" | "lift" | "bike" | "box" | "row" | "stretch";
+  danceStyle?: AgentDanceStyle;
   janitorRouteIndex?: number;
   janitorPauseUntil?: number;
 };
+
+export type AgentDanceStyle = "cheer" | "disco" | "wave" | "spin" | "rock";
 
 export type FurnitureItem = {
   _uid: string;

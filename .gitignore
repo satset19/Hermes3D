@@ -93,3 +93,5 @@ screenshots-*/
 # Bytecode from the bundled Python plugin.
 __pycache__/
 *.pyc
+
+graphify-out/cache/

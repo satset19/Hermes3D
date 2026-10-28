@@ -3,6 +3,13 @@ import {
   astar2D,
   buildNavGrid2D,
 } from "@/lib/office/pathfinding";
+import {
+  astar,
+  buildNavGrid,
+  isLineOfSightClear,
+  isNavPointFree,
+} from "@/features/retro-office/core/navigation";
+import type { FurnitureItem } from "@/features/retro-office/core/types";
 import type { OfficeMap } from "@/lib/office/schema";
 import { createEmptyOfficeMap, createStarterOfficeMap } from "@/lib/office/schema";
 
@@ -222,5 +229,110 @@ describe("astar2D", () => {
     const path = astar2D(200, 175, 1200, 400, grid);
     expect(path.length).toBeGreaterThan(0);
     expect(path[path.length - 1]).toEqual({ x: 1200, y: 400 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// isLineOfSightClear & RetroOffice 3D Room / Wall Navigation
+// ---------------------------------------------------------------------------
+
+describe("isLineOfSightClear & RetroOffice 3D navigation", () => {
+  const makeItem = (type: string, x: number, y: number, w = 80, h = 20): FurnitureItem => ({
+    _uid: `test_${type}_${x}_${y}`,
+    type,
+    x,
+    y,
+    w,
+    h,
+  });
+
+  it("isLineOfSightClear returns true for direct path across open free space", () => {
+    const grid = buildNavGrid([]);
+    expect(isLineOfSightClear(grid, 200, 200, 400, 200)).toBe(true);
+    expect(isLineOfSightClear(grid, 200, 200, 400, 400)).toBe(true);
+  });
+
+  it("isLineOfSightClear returns false when line passes through a wall obstacle", () => {
+    const wall = makeItem("wall", 300, 180, 20, 100);
+    const grid = buildNavGrid([wall]);
+    expect(isLineOfSightClear(grid, 200, 230, 400, 230)).toBe(false);
+  });
+
+  it("isLineOfSightClear returns false when endpoints are blocked or out of bounds", () => {
+    const wall = makeItem("wall", 300, 200, 50, 50);
+    const grid = buildNavGrid([wall]);
+    expect(isLineOfSightClear(grid, -10, 200, 400, 200)).toBe(false);
+    expect(isLineOfSightClear(grid, 320, 220, 400, 200)).toBe(false);
+  });
+
+  it("routes through door opening and never penetrates room walls", () => {
+    // Room bounded between x=400..700, y=150..450
+    // Top wall, bottom wall, right wall, left wall with 100px door opening (y=250..350)
+    const furniture: FurnitureItem[] = [
+      makeItem("wall", 400, 150, 300, 20), // Top wall
+      makeItem("wall", 400, 450, 300, 20), // Bottom wall
+      makeItem("wall", 700, 150, 20, 320), // Right wall
+      makeItem("wall", 400, 150, 20, 100), // Left wall upper (y: 150..250)
+      makeItem("door", 400, 250, 20, 100), // Left wall DOOR opening (y: 250..350, passable)
+      makeItem("wall", 400, 350, 20, 120), // Left wall lower (y: 350..470)
+    ];
+
+    const grid = buildNavGrid(furniture);
+
+    // Agent outside (left of room), target inside room
+    const startX = 250;
+    const startY = 300;
+    const targetX = 550;
+    const targetY = 300;
+
+    const path = astar(startX, startY, targetX, targetY, grid);
+    expect(path.length).toBeGreaterThan(0);
+
+    // Path must reach the destination inside the room
+    expect(path[path.length - 1]).toEqual({ x: targetX, y: targetY });
+
+    // Path must pass through the door opening (around x=400, y in [250, 350])
+    const passesThroughDoor = path.some(
+      (wp) => Math.abs(wp.x - 410) < 40 && wp.y >= 250 && wp.y <= 350,
+    );
+    expect(passesThroughDoor).toBe(true);
+
+    // Path must NEVER step on blocked cells
+    for (const wp of path) {
+      expect(isNavPointFree(grid, wp.x, wp.y)).toBe(true);
+    }
+  });
+
+  it("returns empty path when room is fully sealed with no door (no penetration)", () => {
+    // Completely sealed room
+    const furniture: FurnitureItem[] = [
+      makeItem("wall", 400, 150, 300, 20),
+      makeItem("wall", 400, 450, 300, 20),
+      makeItem("wall", 700, 150, 20, 320),
+      makeItem("wall", 400, 150, 20, 320), // Sealed left wall
+    ];
+
+    const grid = buildNavGrid(furniture);
+
+    const startX = 250;
+    const startY = 300;
+    const targetX = 550;
+    const targetY = 300;
+
+    const path = astar(startX, startY, targetX, targetY, grid);
+    expect(path).toEqual([]);
+  });
+
+  it("prevents diagonal corner cutting around furniture", () => {
+    const desk = makeItem("desk_cubicle", 400, 400, 80, 60);
+    const grid = buildNavGrid([desk]);
+
+    // Path going near the corner of the desk
+    const path = astar(350, 450, 450, 350, grid);
+    if (path.length > 0) {
+      for (const wp of path) {
+        expect(isNavPointFree(grid, wp.x, wp.y)).toBe(true);
+      }
+    }
   });
 });

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import { ThemeToggle } from "@/components/theme-toggle";
 import type { GatewayStatus } from "@/lib/gateway/GatewayClient";
 import { Plug } from "lucide-react";
@@ -39,7 +40,15 @@ export const HeaderBar = ({
   return (
     <div className="ui-topbar relative z-[180]">
       <div className="grid h-10 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center px-3 sm:px-4 md:px-5">
-        <div aria-hidden="true" />
+        <div className="flex items-center">
+          <Link
+            href="/office"
+            className="ui-btn-secondary px-2.5 py-1 font-mono text-[10px] font-semibold tracking-[0.06em] text-foreground"
+            aria-label="Back to Office"
+          >
+            ← Office
+          </Link>
+        </div>
         <p className="truncate text-sm font-semibold tracking-[0.01em] text-foreground">Hermes3D</p>
         <div className="flex items-center justify-end gap-1">
           {status !== "disconnected" ? (

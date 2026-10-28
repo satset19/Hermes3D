@@ -6,7 +6,7 @@ import {
 import { filterOsCompatibleSkills } from "@/lib/skills/presentation";
 import type { SkillStatusEntry } from "@/lib/skills/types";
 
-const normalizeSkillName = (value: string): string => value.trim();
+const normalizeSkillName = (value: string | undefined | null): string => value?.trim() ?? "";
 
 export const resolveVisibleAgentSkillNames = (skills: SkillStatusEntry[]): string[] => {
   return Array.from(

@@ -2,17 +2,17 @@
 
 import { memo, useMemo, type ReactNode } from "react";
 import {
+  BEDROOM_DOOR_Y,
   CANVAS_H,
   CANVAS_W,
   EAST_WING_ROOM_HEIGHT,
   EAST_WING_ROOM_TOP_Y,
-  GYM_ROOM_WIDTH,
-  GYM_ROOM_X,
   QA_LAB_WIDTH,
   QA_LAB_X,
   SCALE,
 } from "@/features/retro-office/core/constants";
 import {
+  BEDROOM_ANNEX_ZONE,
   CITY_PATH_ZONE,
   LOCAL_OFFICE_CANVAS_HEIGHT,
   LOCAL_OFFICE_CANVAS_WIDTH,
@@ -27,6 +27,10 @@ import {
   getWoodFloorTextures,
   withRepeat,
 } from "@/features/retro-office/core/proceduralTextures";
+import { GardenWorkspace, PlanterFoliage } from "./GardenWorkspace";
+
+export { GardenWorkspace, PlanterFoliage } from "./GardenWorkspace";
+import { OnePieceFlagArt } from "./OnePieceFlag";
 
 function FramedPicture({
   position,
@@ -65,56 +69,6 @@ function FramedPicture({
       </mesh>
       <group position={[0, 0, artZ]}>{art}</group>
     </group>
-  );
-}
-
-function UsaFlagArt() {
-  const flagWidth = 0.52;
-  const flagHeight = 0.3;
-  const stripeHeight = flagHeight / 13;
-  const cantonWidth = flagWidth * 0.4;
-  const cantonHeight = stripeHeight * 7;
-
-  return (
-    <>
-      {Array.from({ length: 13 }).map((_, index) => (
-        <mesh
-          key={`usa-stripe-${index}`}
-          position={[0, flagHeight / 2 - stripeHeight / 2 - index * stripeHeight, 0]}
-        >
-          <planeGeometry args={[flagWidth, stripeHeight]} />
-          <meshBasicMaterial
-            color={index % 2 === 0 ? "#b22234" : "#ffffff"}
-            side={2}
-          />
-        </mesh>
-      ))}
-      <mesh
-        position={[
-          -flagWidth / 2 + cantonWidth / 2,
-          flagHeight / 2 - cantonHeight / 2,
-          0.001,
-        ]}
-      >
-        <planeGeometry args={[cantonWidth, cantonHeight]} />
-        <meshBasicMaterial color="#3c3b6e" side={2} />
-      </mesh>
-      {Array.from({ length: 5 }).map((_, row) =>
-        Array.from({ length: 6 }).map((__, column) => (
-          <mesh
-            key={`usa-star-${row}-${column}`}
-            position={[
-              -flagWidth / 2 + 0.04 + column * 0.025,
-              flagHeight / 2 - 0.03 - row * 0.035,
-              0.002,
-            ]}
-          >
-            <circleGeometry args={[0.0045, 6]} />
-            <meshBasicMaterial color="#ffffff" side={2} />
-          </mesh>
-        )),
-      )}
-    </>
   );
 }
 
@@ -226,37 +180,98 @@ function PerimeterWall({
   );
 }
 
-// Layered foliage clumps sitting on top of a planter box: slightly offset
-// flattened spheres in varied greens instead of a flat green slab.
-function PlanterFoliage({
-  position,
-  spread = 1,
+function DoorwayArchway({
+  center,
+  width,
 }: {
-  position: [number, number, number];
-  spread?: number;
+  center: [number, number];
+  width: number;
 }) {
-  const clumps: {
-    offset: [number, number, number];
-    scale: [number, number, number];
-    color: string;
-  }[] = [
-    { offset: [-0.14 * spread, 0, 0.015], scale: [0.13, 0.06, 0.075], color: "#4e7a2f" },
-    { offset: [0.02 * spread, 0.012, -0.02], scale: [0.15, 0.07, 0.085], color: "#5f8f38" },
-    { offset: [0.15 * spread, 0.004, 0.02], scale: [0.12, 0.055, 0.07], color: "#6da345" },
-  ];
+  const wallHeight = 1.65;
+  const capHeight = 0.05;
+  const totalHeight = wallHeight + capHeight;
+  const postWidth = 0.08;
+  const postDepth = 0.16;
+  const lintelHeight = 0.18;
+  const lintelDepth = 0.16;
+  const casingTrimThickness = 0.015;
+  const casingTrimWidth = 0.05;
+
   return (
-    <group position={position}>
-      {clumps.map((clump, index) => (
-        <mesh
-          key={`foliage-${index}`}
-          position={clump.offset}
-          scale={clump.scale}
-          castShadow
-        >
-          <sphereGeometry args={[1, 12, 10]} />
-          <meshStandardMaterial color={clump.color} roughness={0.98} metalness={0} />
-        </mesh>
-      ))}
+    <group position={[center[0], 0, center[1]]}>
+      {/* Left jamb / post wrapping wall edge */}
+      <mesh position={[-width / 2, wallHeight / 2, 0]} castShadow receiveShadow>
+        <boxGeometry args={[postWidth, wallHeight, postDepth]} />
+        <meshStandardMaterial color="#2d2824" roughness={0.65} metalness={0.2} />
+      </mesh>
+
+      {/* Right jamb / post wrapping wall edge */}
+      <mesh position={[width / 2, wallHeight / 2, 0]} castShadow receiveShadow>
+        <boxGeometry args={[postWidth, wallHeight, postDepth]} />
+        <meshStandardMaterial color="#2d2824" roughness={0.65} metalness={0.2} />
+      </mesh>
+
+      {/* Top lintel / archway header */}
+      <mesh
+        position={[0, wallHeight - lintelHeight / 2, 0]}
+        castShadow
+        receiveShadow
+      >
+        <boxGeometry args={[width + postWidth, lintelHeight, lintelDepth]} />
+        <meshStandardMaterial color="#2d2824" roughness={0.65} metalness={0.2} />
+      </mesh>
+
+      {/* Archway top cap trim matching perimeter wall cap */}
+      <mesh position={[0, totalHeight - capHeight / 2, 0]} castShadow>
+        <boxGeometry args={[width + postWidth + 0.04, capHeight, postDepth + 0.02]} />
+        <meshStandardMaterial color="#2b2f33" roughness={0.42} metalness={0.68} />
+      </mesh>
+
+      {/* Decorative keystone accent */}
+      <mesh position={[0, wallHeight - lintelHeight / 2, 0]} castShadow>
+        <boxGeometry args={[0.12, lintelHeight + 0.04, lintelDepth + 0.03]} />
+        <meshStandardMaterial color="#1e2023" roughness={0.5} metalness={0.4} />
+      </mesh>
+
+      {/* Door frame trim casing - Outdoor face (+Z) */}
+      <mesh position={[-width / 2, wallHeight / 2, postDepth / 2 + casingTrimThickness / 2]} castShadow>
+        <boxGeometry args={[casingTrimWidth, wallHeight, casingTrimThickness]} />
+        <meshStandardMaterial color="#1e2023" roughness={0.55} metalness={0.3} />
+      </mesh>
+      <mesh position={[width / 2, wallHeight / 2, postDepth / 2 + casingTrimThickness / 2]} castShadow>
+        <boxGeometry args={[casingTrimWidth, wallHeight, casingTrimThickness]} />
+        <meshStandardMaterial color="#1e2023" roughness={0.55} metalness={0.3} />
+      </mesh>
+      <mesh
+        position={[0, wallHeight - lintelHeight / 2, postDepth / 2 + casingTrimThickness / 2]}
+        castShadow
+      >
+        <boxGeometry args={[width + postWidth + 0.02, casingTrimWidth, casingTrimThickness]} />
+        <meshStandardMaterial color="#1e2023" roughness={0.55} metalness={0.3} />
+      </mesh>
+
+      {/* Door frame trim casing - Indoor face (-Z) */}
+      <mesh position={[-width / 2, wallHeight / 2, -(postDepth / 2 + casingTrimThickness / 2)]} castShadow>
+        <boxGeometry args={[casingTrimWidth, wallHeight, casingTrimThickness]} />
+        <meshStandardMaterial color="#1e2023" roughness={0.55} metalness={0.3} />
+      </mesh>
+      <mesh position={[width / 2, wallHeight / 2, -(postDepth / 2 + casingTrimThickness / 2)]} castShadow>
+        <boxGeometry args={[casingTrimWidth, wallHeight, casingTrimThickness]} />
+        <meshStandardMaterial color="#1e2023" roughness={0.55} metalness={0.3} />
+      </mesh>
+      <mesh
+        position={[0, wallHeight - lintelHeight / 2, -(postDepth / 2 + casingTrimThickness / 2)]}
+        castShadow
+      >
+        <boxGeometry args={[width + postWidth + 0.02, casingTrimWidth, casingTrimThickness]} />
+        <meshStandardMaterial color="#1e2023" roughness={0.55} metalness={0.3} />
+      </mesh>
+
+      {/* Low threshold transition plate at floor level */}
+      <mesh position={[0, 0.005, 0]} receiveShadow>
+        <boxGeometry args={[width - 0.02, 0.01, postDepth - 0.02]} />
+        <meshStandardMaterial color="#35393d" roughness={0.6} metalness={0.4} />
+      </mesh>
     </group>
   );
 }
@@ -275,11 +290,7 @@ export const FloorAndWalls = memo(function FloorAndWalls({
     LOCAL_OFFICE_CANVAS_WIDTH / 2,
     LOCAL_OFFICE_CANVAS_HEIGHT / 2,
   );
-  const [gymZoneCenterX, , roomZoneCenterZ] = toWorld(
-    GYM_ROOM_X + GYM_ROOM_WIDTH / 2,
-    EAST_WING_ROOM_TOP_Y + EAST_WING_ROOM_HEIGHT / 2,
-  );
-  const [qaZoneCenterX] = toWorld(
+  const [qaZoneCenterX, , roomZoneCenterZ] = toWorld(
     QA_LAB_X + QA_LAB_WIDTH / 2,
     EAST_WING_ROOM_TOP_Y + EAST_WING_ROOM_HEIGHT / 2,
   );
@@ -291,12 +302,10 @@ export const FloorAndWalls = memo(function FloorAndWalls({
     (REMOTE_OFFICE_ZONE.minX + REMOTE_OFFICE_ZONE.maxX) / 2,
     (REMOTE_OFFICE_ZONE.minY + REMOTE_OFFICE_ZONE.maxY) / 2,
   );
-  const gymZoneWidth = Math.max(0, GYM_ROOM_WIDTH * SCALE);
   const qaZoneWidth = Math.max(0, QA_LAB_WIDTH * SCALE);
   const roomZoneHeight = EAST_WING_ROOM_HEIGHT * SCALE;
   const roomFloorInset = 0.08;
   const roomZoneFloorHeight = Math.max(0, roomZoneHeight - roomFloorInset * 2);
-  const gymZoneFloorWidth = Math.max(0, gymZoneWidth - roomFloorInset * 2);
   const qaZoneFloorWidth = Math.max(0, qaZoneWidth - roomFloorInset * 2);
   const qaZoneStripeHeight = roomZoneFloorHeight * 0.86;
   const qaZoneStripeWidth = qaZoneFloorWidth * 0.92;
@@ -305,18 +314,56 @@ export const FloorAndWalls = memo(function FloorAndWalls({
   const localSouthWallZ = localOfficeCenterZ + localOfficeHeight / 2;
   const localWestWallX = localOfficeCenterX - localOfficeWidth / 2;
   const localEastWallX = localOfficeCenterX + localOfficeWidth / 2;
+  const southWallDoorOpeningStartX = 860;
+  const southWallDoorOpeningEndX = 940;
+  const southWallLeftLength = southWallDoorOpeningStartX * SCALE;
+  const southWallRightLength = (LOCAL_OFFICE_CANVAS_WIDTH - southWallDoorOpeningEndX) * SCALE;
+  const southWallDoorwayWidth = (southWallDoorOpeningEndX - southWallDoorOpeningStartX) * SCALE;
+  const [southWallLeftCenterX] = toWorld(southWallDoorOpeningStartX / 2, 0);
+  const [southWallRightCenterX] = toWorld((southWallDoorOpeningEndX + LOCAL_OFFICE_CANVAS_WIDTH) / 2, 0);
+  const [southWallDoorwayCenterX] = toWorld((southWallDoorOpeningStartX + southWallDoorOpeningEndX) / 2, 0);
+  const bedroomDeckWidth =
+    (BEDROOM_ANNEX_ZONE.maxX - BEDROOM_ANNEX_ZONE.minX) * SCALE;
+  const bedroomDeckHeight =
+    (BEDROOM_ANNEX_ZONE.maxY - BEDROOM_ANNEX_ZONE.minY) * SCALE;
+  const [bedroomDeckCenterX, , bedroomDeckCenterZ] = toWorld(
+    (BEDROOM_ANNEX_ZONE.minX + BEDROOM_ANNEX_ZONE.maxX) / 2,
+    (BEDROOM_ANNEX_ZONE.minY + BEDROOM_ANNEX_ZONE.maxY) / 2,
+  );
+  const walkwaySouthWidth = southWallDoorwayWidth;
+  const walkwayCorridorWidth = 70 * SCALE;
+  const [walkwaySouthCenterX, , walkwaySouthCenterZ] = toWorld(
+    (southWallDoorOpeningStartX + southWallDoorOpeningEndX) / 2,
+    (LOCAL_OFFICE_CANVAS_HEIGHT + (BEDROOM_DOOR_Y - 35)) / 2,
+  );
+  const walkwaySouthLength =
+    (BEDROOM_DOOR_Y - 35 - LOCAL_OFFICE_CANVAS_HEIGHT) * SCALE;
+  const [walkwayEastCenterX, , walkwayEastCenterZ] = toWorld(
+    (southWallDoorOpeningStartX + BEDROOM_ANNEX_ZONE.minX) / 2,
+    BEDROOM_DOOR_Y,
+  );
+  const walkwayEastLength =
+    (BEDROOM_ANNEX_ZONE.minX - southWallDoorOpeningStartX) * SCALE;
+  const walkwayEastWidth = walkwayCorridorWidth;
   const groundCenterX = showRemoteOffice ? districtCenterX : localOfficeCenterX;
   const groundCenterZ = showRemoteOffice ? districtCenterZ : localOfficeCenterZ;
   const groundWidth = showRemoteOffice ? districtWidth : localOfficeWidth;
   const groundHeight = showRemoteOffice ? districtHeight : localOfficeHeight;
   const woodFloor = useMemo(() => withRepeat(getWoodFloorTextures(), 12, 5), []);
+  const bedroomDeckWood = useMemo(
+    () => withRepeat(getWoodFloorTextures(), 8, 4),
+    [],
+  );
   const districtConcrete = useMemo(
     () => withRepeat(getConcreteTextures(), 10, 10),
     [],
   );
   const pathGrass = useMemo(() => withRepeat(getGrassTextures(), 14, 2), []);
   const pathConcrete = useMemo(() => withRepeat(getConcreteTextures(), 8, 1), []);
-  const gymRubber = useMemo(() => withRepeat(getCarpetTextures(), 6, 4), []);
+  const walkwayConcrete = useMemo(
+    () => withRepeat(getConcreteTextures(), 8, 2),
+    [],
+  );
 
   return (
     <group>
@@ -436,8 +483,11 @@ export const FloorAndWalls = memo(function FloorAndWalls({
             />
           </mesh>
 
-          {Array.from({ length: 8 }).map((_, index) => {
-            const [wx, , wz] = toWorld(330 + index * 170, 820 + (index % 2 === 0 ? -44 : 44));
+          {/* Garden Workspace in CITY_PATH_ZONE (Y: 780 to 940, X: 600 to 1200) */}
+          <GardenWorkspace />
+
+          {[200, 280, 360, 440, 520].map((bedX, index) => {
+            const [wx, , wz] = toWorld(bedX, 820 + (index % 2 === 0 ? -44 : 44));
             return (
               <mesh key={`garden-bed-${index}`} position={[wx, 0.03, wz]} castShadow receiveShadow>
                 <boxGeometry args={[0.58, 0.06, 0.18]} />
@@ -446,8 +496,8 @@ export const FloorAndWalls = memo(function FloorAndWalls({
             );
           })}
 
-          {Array.from({ length: 8 }).map((_, index) => {
-            const [wx, , wz] = toWorld(330 + index * 170, 820 + (index % 2 === 0 ? -44 : 44));
+          {[200, 280, 360, 440, 520].map((bedX, index) => {
+            const [wx, , wz] = toWorld(bedX, 820 + (index % 2 === 0 ? -44 : 44));
             return (
               <PlanterFoliage
                 key={`garden-bed-top-${index}`}
@@ -457,21 +507,25 @@ export const FloorAndWalls = memo(function FloorAndWalls({
             );
           })}
 
-          {Array.from({ length: 6 }).map((_, index) => {
-            const [wx, , wz] = toWorld(420 + index * 190, 900);
-            return (
-              <group key={`garden-light-${index}`} position={[wx, 0, wz]}>
-                <mesh position={[0, 0.2, 0]} castShadow>
-                  <cylinderGeometry args={[0.025, 0.025, 0.4, 10]} />
-                  <meshStandardMaterial color="#d7ccc8" roughness={0.62} metalness={0.24} />
-                </mesh>
-                <mesh position={[0, 0.43, 0]}>
-                  <sphereGeometry args={[0.05, 12, 12]} />
-                  <meshStandardMaterial color="#fff3cd" emissive="#fff3cd" emissiveIntensity={0.55} />
-                </mesh>
-              </group>
-            );
-          })}
+          {Array.from({ length: 6 })
+            .map((_, index) => {
+              const lightX = 420 + index * 190;
+              if (lightX >= 580 && lightX <= 1220) return null;
+              if (lightX >= 1300 && lightX <= 1750) return null;
+              const [wx, , wz] = toWorld(lightX, 900);
+              return (
+                <group key={`garden-light-${index}`} position={[wx, 0, wz]}>
+                  <mesh position={[0, 0.2, 0]} castShadow>
+                    <cylinderGeometry args={[0.025, 0.025, 0.4, 10]} />
+                    <meshStandardMaterial color="#d7ccc8" roughness={0.62} metalness={0.24} />
+                  </mesh>
+                  <mesh position={[0, 0.43, 0]}>
+                    <sphereGeometry args={[0.05, 12, 12]} />
+                    <meshStandardMaterial color="#fff3cd" emissive="#fff3cd" emissiveIntensity={0.55} />
+                  </mesh>
+                </group>
+              );
+            })}
 
           {Array.from({ length: 8 }).map((_, index) => {
             const [wx, , wz] = toWorld(220 + index * 190, 1005);
@@ -488,8 +542,8 @@ export const FloorAndWalls = memo(function FloorAndWalls({
             );
           })}
 
-          {Array.from({ length: 4 }).map((_, index) => {
-            const [wx, , wz] = toWorld(250 + index * 430, 955);
+          {[220, 540, 860, 1180].map((planterX, index) => {
+            const [wx, , wz] = toWorld(planterX, 955);
             return (
               <mesh key={`city-planter-${index}`} position={[wx, 0.08, wz]} castShadow>
                 <boxGeometry args={[0.46, 0.14, 0.26]} />
@@ -498,8 +552,8 @@ export const FloorAndWalls = memo(function FloorAndWalls({
             );
           })}
 
-          {Array.from({ length: 4 }).map((_, index) => {
-            const [wx, , wz] = toWorld(250 + index * 430, 955);
+          {[220, 540, 860, 1180].map((planterX, index) => {
+            const [wx, , wz] = toWorld(planterX, 955);
             return (
               <PlanterFoliage
                 key={`city-planter-top-${index}`}
@@ -511,44 +565,71 @@ export const FloorAndWalls = memo(function FloorAndWalls({
         </>
       ) : null}
 
-      {gymZoneFloorWidth > 0 && roomZoneFloorHeight > 0 ? (
-        <>
-          <mesh
-            position={[gymZoneCenterX, 0.002, roomZoneCenterZ]}
-            rotation={[-Math.PI / 2, 0, 0]}
-            receiveShadow
-          >
-            <planeGeometry args={[gymZoneFloorWidth, roomZoneFloorHeight]} />
-            <meshStandardMaterial
-              color="#40464f"
-              map={gymRubber.map}
-              roughnessMap={gymRubber.roughnessMap}
-              normalMap={gymRubber.normalMap}
-              normalScale={[0.5, 0.5]}
-              roughness={0.98}
-              metalness={0.02}
-            />
-          </mesh>
-          {showRemoteOffice ? (
-            <mesh
-              position={[gymZoneCenterX, 0.002, roomZoneCenterZ + remoteOfficeOffsetZ]}
-              rotation={[-Math.PI / 2, 0, 0]}
-              receiveShadow
-            >
-              <planeGeometry args={[gymZoneFloorWidth, roomZoneFloorHeight]} />
-              <meshStandardMaterial
-                color="#40464f"
-                map={gymRubber.map}
-                roughnessMap={gymRubber.roughnessMap}
-                normalMap={gymRubber.normalMap}
-                normalScale={[0.5, 0.5]}
-                roughness={0.98}
-                metalness={0.02}
-              />
-            </mesh>
-          ) : null}
-        </>
-      ) : null}
+      {/* Bedroom Annex outdoor foundation floor */}
+      <mesh
+        position={[bedroomDeckCenterX, 0.002, bedroomDeckCenterZ]}
+        rotation={[-Math.PI / 2, 0, 0]}
+        receiveShadow
+      >
+        <planeGeometry args={[bedroomDeckWidth + 0.12, bedroomDeckHeight + 0.12]} />
+        <meshStandardMaterial
+          color="#4e3629"
+          roughness={0.88}
+          metalness={0.06}
+        />
+      </mesh>
+      <mesh
+        position={[bedroomDeckCenterX, 0.0035, bedroomDeckCenterZ]}
+        rotation={[-Math.PI / 2, 0, 0]}
+        receiveShadow
+      >
+        <planeGeometry args={[bedroomDeckWidth, bedroomDeckHeight]} />
+        <meshPhysicalMaterial
+          color="#d4aa7d"
+          map={bedroomDeckWood.map}
+          roughnessMap={bedroomDeckWood.roughnessMap}
+          normalMap={bedroomDeckWood.normalMap}
+          normalScale={[0.5, 0.5]}
+          clearcoat={0.15}
+          clearcoatRoughness={0.65}
+          roughness={0.85}
+          metalness={0.02}
+        />
+      </mesh>
+
+      {/* Walkway from HQ south doorway heading east towards Bedroom Annex door */}
+      <mesh
+        position={[walkwaySouthCenterX, 0.0042, walkwaySouthCenterZ]}
+        rotation={[-Math.PI / 2, 0, 0]}
+        receiveShadow
+      >
+        <planeGeometry args={[walkwaySouthWidth, walkwaySouthLength]} />
+        <meshStandardMaterial
+          color="#d8c5a6"
+          map={walkwayConcrete.map}
+          roughnessMap={walkwayConcrete.roughnessMap}
+          normalMap={walkwayConcrete.normalMap}
+          normalScale={[0.5, 0.5]}
+          roughness={0.92}
+          metalness={0.02}
+        />
+      </mesh>
+      <mesh
+        position={[walkwayEastCenterX, 0.0042, walkwayEastCenterZ]}
+        rotation={[-Math.PI / 2, 0, 0]}
+        receiveShadow
+      >
+        <planeGeometry args={[walkwayEastLength, walkwayEastWidth]} />
+        <meshStandardMaterial
+          color="#d8c5a6"
+          map={walkwayConcrete.map}
+          roughnessMap={walkwayConcrete.roughnessMap}
+          normalMap={walkwayConcrete.normalMap}
+          normalScale={[0.5, 0.5]}
+          roughness={0.92}
+          metalness={0.02}
+        />
+      </mesh>
 
       {qaZoneFloorWidth > 0 && roomZoneFloorHeight > 0 ? (
         <>
@@ -697,10 +778,22 @@ export const FloorAndWalls = memo(function FloorAndWalls({
           axis="x"
         />
       ) : null}
+      {/* South perimeter wall - Left segment (X: 0 to 860) */}
       <PerimeterWall
-        center={[localOfficeCenterX, localSouthWallZ]}
-        length={localOfficeWidth}
+        center={[southWallLeftCenterX, localSouthWallZ]}
+        length={southWallLeftLength}
         axis="x"
+      />
+      {/* South perimeter wall - Right segment (X: 940 to 1800) */}
+      <PerimeterWall
+        center={[southWallRightCenterX, localSouthWallZ]}
+        length={southWallRightLength}
+        axis="x"
+      />
+      {/* Doorway frame / portal archway in the gap (X: 860 to 940) */}
+      <DoorwayArchway
+        center={[southWallDoorwayCenterX, localSouthWallZ]}
+        width={southWallDoorwayWidth}
       />
       {showRemoteOffice ? (
         <PerimeterWall
@@ -744,8 +837,12 @@ export const FloorAndWalls = memo(function FloorAndWalls({
           <meshStandardMaterial color="#14151a" roughness={0.85} metalness={0.1} />
         </mesh>
       ) : null}
-      <mesh position={[localOfficeCenterX, 0.03, localSouthWallZ - 0.04]}>
-        <boxGeometry args={[localOfficeWidth, 0.06, 0.04]} />
+      <mesh position={[southWallLeftCenterX, 0.03, localSouthWallZ - 0.04]}>
+        <boxGeometry args={[southWallLeftLength, 0.06, 0.04]} />
+        <meshStandardMaterial color="#14151a" roughness={0.85} metalness={0.1} />
+      </mesh>
+      <mesh position={[southWallRightCenterX, 0.03, localSouthWallZ - 0.04]}>
+        <boxGeometry args={[southWallRightLength, 0.06, 0.04]} />
         <meshStandardMaterial color="#14151a" roughness={0.85} metalness={0.1} />
       </mesh>
       {showRemoteOffice ? (
@@ -814,7 +911,7 @@ export const WallPictures = memo(function WallPictures({
       <OfficeFlagPole
         position={localFlagPolePosition}
         rotY={0.32}
-        art={<UsaFlagArt />}
+        art={<OnePieceFlagArt />}
       />
       {showRemoteOffice ? (
         <OfficeFlagPole
@@ -973,7 +1070,7 @@ export const WallPictures = memo(function WallPictures({
       />
 
       <FramedPicture
-        position={[localCenterX, pictureY, southZ]}
+        position={[localCenterX - 2.5, pictureY, southZ]}
         rotY={Math.PI}
         w={0.5}
         h={0.36}

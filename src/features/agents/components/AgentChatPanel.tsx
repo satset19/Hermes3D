@@ -13,7 +13,7 @@ import {
 import type { AgentState as AgentRecord } from "@/features/agents/state/store";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Check, ChevronRight, Clock, Mic, Paperclip, Pencil, Square, Trash2, X } from "lucide-react";
+import { Check, ChevronRight, Clock, Mic, Music, Paperclip, Pencil, Square, Trash2, X } from "lucide-react";
 import type { GatewayModelChoice } from "@/lib/gateway/models";
 import type { AgentAvatarProfile } from "@/lib/avatars/profile";
 import { rewriteMediaLinesToMarkdown } from "@/lib/text/media-markdown";
@@ -26,6 +26,7 @@ import type {
   PendingExecApproval,
 } from "@/features/agents/approvals/types";
 import type { RuntimeAttachment } from "@/lib/runtime/types";
+import type { AgentDanceStyle } from "@/features/retro-office/core/types";
 import {
   buildAgentChatRenderBlocks,
   buildFinalAgentChatItems,
@@ -138,6 +139,7 @@ type AgentChatPanelProps = {
   onOpenSettings?: () => void;
   onRename?: (name: string) => Promise<boolean>;
   onNewSession?: () => Promise<void> | void;
+  onClearChat?: () => Promise<void> | void;
   onModelChange: (value: string | null) => void;
   onThinkingChange: (value: string | null) => void;
   onToolCallingToggle?: (enabled: boolean) => void;
@@ -150,6 +152,7 @@ type AgentChatPanelProps = {
   pendingExecApprovals?: PendingExecApproval[];
   onResolveExecApproval?: (id: string, decision: ExecApprovalDecision) => void;
   onVoiceSend?: (payload: VoiceSendPayload) => Promise<void>;
+  onDance?: (style: AgentDanceStyle | "stop") => void;
 };
 
 const formatApprovalExpiry = (timestampMs: number): string => {
@@ -172,53 +175,54 @@ const ExecApprovalCard = memo(function ExecApprovalCard({
   const disabled = approval.resolving || !onResolve;
   return (
     <div
-      className={`w-full ${ASSISTANT_MAX_WIDTH_EXPANDED_CLASS} ${ASSISTANT_GUTTER_CLASS} ui-badge-approval self-start rounded-md px-3 py-2 shadow-2xs`}
+      className={`w-full ${ASSISTANT_MAX_WIDTH_EXPANDED_CLASS} ${ASSISTANT_GUTTER_CLASS} ui-badge-approval self-start rounded-md px-1.5 py-0.5 text-[8px] shadow-2xs`}
       data-testid={`exec-approval-card-${approval.id}`}
     >
-      <div className="type-meta">
+      <div className="font-mono text-[8px]">
         Exec approval required
       </div>
-      <div className="mt-2 rounded-md bg-surface-3 px-2 py-1.5 shadow-2xs">
-        <div className="font-mono text-[10px] font-semibold text-foreground">{approval.command}</div>
+      <div className="mt-1 rounded bg-surface-3 px-1.5 py-0.5 shadow-2xs">
+        <div className="font-mono text-[8px] font-semibold text-foreground">{approval.command}</div>
       </div>
-      <div className="mt-2 grid gap-1 text-[11px] text-muted-foreground sm:grid-cols-2">
+      <div className="mt-1 grid gap-1 text-[8px] text-muted-foreground sm:grid-cols-2">
         <div>Host: {approval.host ?? "unknown"}</div>
         <div>Expires: {formatApprovalExpiry(approval.expiresAtMs)}</div>
         {approval.cwd ? <div className="sm:col-span-2">CWD: {approval.cwd}</div> : null}
       </div>
       {approval.error ? (
-        <div className="ui-alert-danger mt-2 rounded-md px-2 py-1 text-[11px] shadow-2xs">
+        <div className="ui-alert-danger mt-1 rounded px-1.5 py-0.5 text-[8px] shadow-2xs">
           {approval.error}
         </div>
       ) : null}
-      <div className="mt-2 flex flex-wrap gap-2">
-        <button
-          type="button"
-          className="rounded-md border border-border/70 bg-surface-3 px-2.5 py-1 font-mono text-[12px] font-medium tracking-[0.02em] text-foreground transition hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-60"
-          onClick={() => onResolve?.(approval.id, "allow-once")}
-          disabled={disabled}
-          aria-label={`Allow once for exec approval ${approval.id}`}
+      <div className="mt-1.5 flex items-center gap-1.5">
+        <label
+          htmlFor={`exec-approval-select-${approval.id}`}
+          className="font-mono text-[8px] text-muted-foreground whitespace-nowrap"
         >
-          Allow once
-        </button>
-        <button
-          type="button"
-          className="rounded-md border border-border/70 bg-surface-3 px-2.5 py-1 font-mono text-[12px] font-medium tracking-[0.02em] text-foreground transition hover:bg-surface-2 disabled:cursor-not-allowed disabled:opacity-60"
-          onClick={() => onResolve?.(approval.id, "allow-always")}
+          Decision:
+        </label>
+        <select
+          id={`exec-approval-select-${approval.id}`}
+          data-testid={`exec-approval-select-${approval.id}`}
+          aria-label={`Select decision for exec approval ${approval.id}`}
+          className="ui-input ui-control-important h-5 rounded border border-border/70 bg-surface-3 px-1.5 font-mono text-[8px] font-medium text-foreground transition hover:bg-surface-2 focus:outline-none focus:ring-1 focus:ring-ring disabled:cursor-not-allowed disabled:opacity-60"
+          style={CHAT_SELECT_STYLE}
           disabled={disabled}
-          aria-label={`Always allow for exec approval ${approval.id}`}
+          value=""
+          onChange={(event) => {
+            const decision = event.target.value as ExecApprovalDecision;
+            if (decision) {
+              onResolve?.(approval.id, decision);
+            }
+          }}
         >
-          Always allow
-        </button>
-        <button
-          type="button"
-          className="ui-btn-danger rounded-md px-2.5 py-1 font-mono text-[12px] font-medium tracking-[0.02em] transition disabled:cursor-not-allowed disabled:opacity-60"
-          onClick={() => onResolve?.(approval.id, "deny")}
-          disabled={disabled}
-          aria-label={`Deny exec approval ${approval.id}`}
-        >
-          Deny
-        </button>
+          <option value="" disabled>
+            {approval.resolving ? "Resolving..." : "Select decision..."}
+          </option>
+          <option value="allow-once">Allow once</option>
+          <option value="allow-always">Always allow</option>
+          <option value="deny">Deny</option>
+        </select>
       </div>
     </div>
   );
@@ -235,18 +239,18 @@ const ToolCallDetails = memo(function ToolCallDetails({
   const [open, setOpen] = useState(false);
   const resolvedClassName =
     className ??
-    `w-full ${ASSISTANT_MAX_WIDTH_EXPANDED_CLASS} ${ASSISTANT_GUTTER_CLASS} self-start rounded-md bg-surface-3 px-2 py-1 text-[10px] text-muted-foreground shadow-2xs`;
+    `w-full ${ASSISTANT_MAX_WIDTH_EXPANDED_CLASS} ${ASSISTANT_GUTTER_CLASS} self-start rounded-md bg-surface-3 px-1.5 py-0.5 text-[8px] text-muted-foreground shadow-2xs`;
   if (inlineOnly) {
     return (
       <div className={resolvedClassName}>
-        <div className="font-mono text-[10px] font-semibold tracking-[0.11em]">{summaryText}</div>
+        <div className="font-mono text-[8px] font-semibold tracking-[0.11em]">{summaryText}</div>
       </div>
     );
   }
   return (
     <details open={open} className={resolvedClassName}>
       <summary
-        className="cursor-pointer select-none font-mono text-[10px] font-semibold tracking-[0.11em]"
+        className="cursor-pointer select-none font-mono text-[8px] font-semibold tracking-[0.11em]"
         onClick={(event) => {
           event.preventDefault();
           setOpen((current) => !current);
@@ -255,7 +259,7 @@ const ToolCallDetails = memo(function ToolCallDetails({
         {summaryText}
       </summary>
       {open && body ? (
-        <div className="agent-markdown agent-tool-markdown mt-1 text-foreground">
+        <div className="agent-markdown agent-tool-markdown mt-1 text-[8px] leading-[1.3] text-foreground">
           <ReactMarkdown remarkPlugins={[remarkGfm]}>
             {rewriteMediaLinesToMarkdown(body)}
           </ReactMarkdown>
@@ -295,23 +299,23 @@ const ThinkingDetailsRow = memo(function ThinkingDetailsRow({
   return (
     <details
       open={open}
-      className="ui-chat-thinking group rounded-md px-2 py-1.5 text-[10px] shadow-2xs"
+      className="ui-chat-thinking group rounded-md px-1.5 py-0.5 text-[8px] shadow-2xs"
     >
       <summary
-        className="flex cursor-pointer list-none items-center gap-2 opacity-65 [&::-webkit-details-marker]:hidden"
+        className="flex cursor-pointer list-none items-center gap-1.5 opacity-65 [&::-webkit-details-marker]:hidden"
         onClick={(event) => {
           event.preventDefault();
           setOpen((current) => !current);
         }}
       >
-        <ChevronRight className="h-3 w-3 shrink-0 transition group-open:rotate-90" />
-        <span className="flex min-w-0 items-center gap-2">
-          <span className="font-mono text-[10px] font-medium tracking-[0.02em]">
+        <ChevronRight className="h-2.5 w-2.5 shrink-0 transition group-open:rotate-90" />
+        <span className="flex min-w-0 items-center gap-1.5">
+          <span className="font-mono text-[8px] font-medium tracking-[0.02em]">
             Thinking (internal)
           </span>
           {typeof durationMs === "number" ? (
-            <span className="inline-flex items-center gap-1 font-mono text-[10px] font-medium tracking-[0.02em] text-muted-foreground/80">
-              <Clock className="h-3 w-3" />
+            <span className="inline-flex items-center gap-1 font-mono text-[8px] font-medium tracking-[0.02em] text-muted-foreground/80">
+              <Clock className="h-2.5 w-2.5" />
               {formatDurationLabel(durationMs)}
             </span>
           ) : null}
@@ -325,12 +329,12 @@ const ThinkingDetailsRow = memo(function ThinkingDetailsRow({
         </span>
       </summary>
       {open ? (
-        <div className="mt-2 space-y-2 pl-5">
+        <div className="mt-1 space-y-1 pl-3">
           {traceEvents.map((event, index) =>
             event.kind === "thinking" ? (
               <div
                 key={`thinking-event-${index}-${event.text.slice(0, 48)}`}
-                className="agent-markdown min-w-0 text-foreground/85"
+                className="agent-markdown min-w-0 text-[8px] leading-[1.3] text-foreground/85"
               >
                 <ReactMarkdown remarkPlugins={[remarkGfm]}>{event.text}</ReactMarkdown>
               </div>
@@ -338,7 +342,7 @@ const ThinkingDetailsRow = memo(function ThinkingDetailsRow({
               <ToolCallDetails
                 key={`thinking-tool-${index}-${event.text.slice(0, 48)}`}
                 line={event.text}
-                className="rounded-md border border-border/45 bg-surface-2/65 px-2 py-1 text-[10px] text-muted-foreground/90 shadow-2xs"
+                className="rounded border border-border/45 bg-surface-2/65 px-1.5 py-0.5 text-[8px] text-muted-foreground/90 shadow-2xs"
               />
             )
           )}
@@ -356,18 +360,18 @@ const UserMessageCard = memo(function UserMessageCard({
   timestampMs?: number;
 }) {
   return (
-    <div className="ui-chat-user-card w-full max-w-[70ch] self-end overflow-hidden rounded-[var(--radius-small)] bg-[color:var(--chat-user-bg)]">
-      <div className="flex items-center justify-between gap-3 bg-[color:var(--chat-user-header-bg)] px-3 py-2 dark:px-3.5 dark:py-2.5">
-        <div className="type-meta min-w-0 truncate font-mono text-foreground/90">
+    <div className="ui-chat-user-card w-full max-w-[42ch] self-end overflow-hidden rounded-[var(--radius-small)] bg-[color:var(--chat-user-bg)]">
+      <div className="flex items-center justify-between gap-2 bg-[color:var(--chat-user-header-bg)] px-2 py-1">
+        <div className="min-w-0 truncate font-mono text-[8px] text-foreground/90">
           You
         </div>
         {typeof timestampMs === "number" ? (
-          <time className="type-meta shrink-0 rounded-md bg-surface-3 px-2 py-0.5 font-mono text-muted-foreground/70">
+          <time className="shrink-0 rounded bg-surface-3 px-1.5 py-0.5 font-mono text-[8px] text-muted-foreground/70">
             {formatChatTimestamp(timestampMs)}
           </time>
         ) : null}
       </div>
-      <div className="agent-markdown type-body px-3 py-3 text-foreground dark:px-3.5 dark:py-3.5">
+      <div className="agent-markdown px-2 py-1.5 text-[9px] leading-[1.35] text-foreground">
         <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
       </div>
     </div>
@@ -420,15 +424,15 @@ const AssistantMessageCard = memo(function AssistantMessageCard({
             name={name}
             avatarProfile={avatarProfile}
             avatarUrl={avatarUrl}
-            size={22}
+            size={14}
           />
         </div>
         <div className="flex items-center justify-between gap-3 py-0.5">
-          <div className="type-meta min-w-0 truncate font-mono text-foreground/90">
+          <div className="min-w-0 truncate font-mono text-[8px] text-foreground/90">
             {name}
           </div>
           {resolvedTimestamp !== null ? (
-            <time className="type-meta shrink-0 rounded-md bg-surface-3 px-2 py-0.5 font-mono text-muted-foreground/90">
+            <time className="shrink-0 rounded bg-surface-3 px-1.5 py-0.5 font-mono text-[8px] text-muted-foreground/90">
               {formatChatTimestamp(resolvedTimestamp)}
             </time>
           ) : null}
@@ -436,12 +440,12 @@ const AssistantMessageCard = memo(function AssistantMessageCard({
 
         {compactStreamingIndicator ? (
           <div
-            className="mt-2 inline-flex items-center gap-2 rounded-md bg-surface-3 px-3 py-2 text-[10px] text-muted-foreground/80 shadow-2xs"
+            className="mt-1 inline-flex items-center gap-1.5 rounded bg-surface-3 px-1.5 py-0.5 text-[8px] text-muted-foreground/80 shadow-2xs"
             role="status"
             aria-live="polite"
             data-testid="agent-typing-indicator"
           >
-            <span className="font-mono text-[10px] font-medium tracking-[0.02em]">
+            <span className="font-mono text-[8px] font-medium tracking-[0.02em]">
               Thinking
             </span>
             <span className="typing-dots" aria-hidden="true">
@@ -451,15 +455,15 @@ const AssistantMessageCard = memo(function AssistantMessageCard({
             </span>
           </div>
         ) : (
-          <div className="mt-2 space-y-3 dark:space-y-5">
+          <div className="mt-1 space-y-2">
             {streaming && !hasThinking ? (
               <div
-                className="flex items-center gap-2 text-[10px] text-muted-foreground/80"
+                className="flex items-center gap-1.5 text-[8px] text-muted-foreground/80"
                 role="status"
                 aria-live="polite"
                 data-testid="agent-typing-indicator"
               >
-                <span className="font-mono text-[10px] font-medium tracking-[0.02em]">
+                <span className="font-mono text-[8px] font-medium tracking-[0.02em]">
                   Thinking
                 </span>
                 <span className="typing-dots" aria-hidden="true">
@@ -481,12 +485,12 @@ const AssistantMessageCard = memo(function AssistantMessageCard({
             ) : null}
 
             {contentText ? (
-              <div className="ui-chat-assistant-card">
+              <div className="ui-chat-assistant-card p-1.5">
                 {streaming ? (
                   (() => {
                     if (!contentText.includes("MEDIA:")) {
                       return (
-                        <div className="whitespace-pre-wrap break-words text-foreground">
+                        <div className="whitespace-pre-wrap break-words text-[9px] leading-[1.35] text-foreground">
                           {contentText}
                         </div>
                       );
@@ -494,19 +498,19 @@ const AssistantMessageCard = memo(function AssistantMessageCard({
                     const rewritten = rewriteMediaLinesToMarkdown(contentText);
                     if (!rewritten.includes("![](")) {
                       return (
-                        <div className="whitespace-pre-wrap break-words text-foreground">
+                        <div className="whitespace-pre-wrap break-words text-[9px] leading-[1.35] text-foreground">
                           {contentText}
                         </div>
                       );
                     }
                     return (
-                      <div className="agent-markdown text-foreground">
+                      <div className="agent-markdown text-[9px] leading-[1.35] text-foreground">
                         <ReactMarkdown remarkPlugins={[remarkGfm]}>{rewritten}</ReactMarkdown>
                       </div>
                     );
                   })()
                 ) : (
-                  <div className="agent-markdown text-foreground">
+                  <div className="agent-markdown text-[9px] leading-[1.35] text-foreground">
                     <ReactMarkdown remarkPlugins={[remarkGfm]}>
                       {rewriteMediaLinesToMarkdown(contentText)}
                     </ReactMarkdown>
@@ -543,17 +547,17 @@ const AssistantIntroCard = memo(function AssistantIntroCard({
             name={name}
             avatarProfile={avatarProfile}
             avatarUrl={avatarUrl}
-            size={22}
+            size={14}
           />
         </div>
         <div className="flex items-center justify-between gap-3 py-0.5">
-          <div className="type-meta min-w-0 truncate font-mono text-foreground/90">
+          <div className="min-w-0 truncate font-mono text-[8px] text-foreground/90">
             {name}
           </div>
         </div>
-        <div className="ui-chat-assistant-card mt-2">
-          <div className="text-[14px] leading-[1.65] text-foreground">{title}</div>
-          <div className="mt-2 font-mono text-[10px] tracking-[0.03em] text-muted-foreground/80">
+        <div className="ui-chat-assistant-card mt-1 p-1.5">
+          <div className="text-[9px] leading-[1.35] text-foreground">{title}</div>
+          <div className="mt-1 font-mono text-[8px] tracking-[0.03em] text-muted-foreground/80">
             Try describing a task, bug, or question to get started.
           </div>
         </div>
@@ -1085,7 +1089,7 @@ const AgentChatComposer = memo(function AgentChatComposer({
           </button>
         </div>
       </div>
-      <div className="rounded-2xl border border-border/65 bg-surface-2/45 px-3 py-2">
+      <div className="rounded-xl border border-border/65 bg-surface-2/45 px-2.5 py-1.5">
         {queuedMessages.length > 0 ? (
           <div
             className={`mb-2 grid items-start gap-2 ${
@@ -1100,9 +1104,9 @@ const AgentChatComposer = memo(function AgentChatComposer({
               {queuedMessages.map((queuedMessage, index) => (
                 <div
                   key={`${index}-${queuedMessage}`}
-                  className="flex w-full min-w-0 max-w-full items-center gap-1 overflow-hidden rounded-md border border-border/70 bg-card/80 px-2 py-1 text-[11px] text-foreground"
+                  className="flex w-full min-w-0 max-w-full items-center gap-1 overflow-hidden rounded border border-border/70 bg-card/80 px-1.5 py-0.5 text-[9px] text-foreground"
                 >
-                  <span className="font-mono text-[10px] uppercase tracking-[0.06em] text-muted-foreground">
+                  <span className="font-mono text-[8px] uppercase tracking-[0.06em] text-muted-foreground">
                     Queued
                   </span>
                   <span
@@ -1113,12 +1117,12 @@ const AgentChatComposer = memo(function AgentChatComposer({
                   </span>
                   <button
                     type="button"
-                    className="inline-flex h-4 w-4 flex-none items-center justify-center rounded-sm text-muted-foreground transition hover:bg-surface-2 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+                    className="inline-flex h-3.5 w-3.5 flex-none items-center justify-center rounded-sm text-muted-foreground transition hover:bg-surface-2 hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
                     aria-label={`Remove queued message ${index + 1}`}
                     onClick={() => onRemoveQueuedMessage?.(index)}
                     disabled={!onRemoveQueuedMessage}
                   >
-                    <Trash2 className="h-3 w-3" />
+                    <Trash2 className="h-2.5 w-2.5" />
                   </button>
                 </div>
               ))}
@@ -1129,7 +1133,7 @@ const AgentChatComposer = memo(function AgentChatComposer({
                 aria-hidden="true"
                 tabIndex={-1}
                 disabled
-                className="invisible rounded-md border border-border/70 bg-surface-3 px-3 py-2 font-mono text-[12px] font-medium tracking-[0.02em] text-foreground"
+                className="invisible rounded border border-border/70 bg-surface-3 px-2 py-1 font-mono text-[10px] font-medium tracking-[0.02em] text-foreground"
               >
                 {stopBusy ? "Stopping" : "Stop"}
               </button>
@@ -1139,7 +1143,7 @@ const AgentChatComposer = memo(function AgentChatComposer({
               aria-hidden="true"
               tabIndex={-1}
               disabled
-              className="ui-btn-primary ui-btn-send invisible px-3 py-2 font-mono text-[12px] font-medium tracking-[0.02em]"
+              className="ui-btn-primary ui-btn-send invisible px-2 py-1 font-mono text-[10px] font-medium tracking-[0.02em]"
             >
               Send
             </button>
@@ -1183,7 +1187,7 @@ const AgentChatComposer = memo(function AgentChatComposer({
         ) : null}
         {voiceStatusText || voiceError || attachmentStatus ? (
           <div
-            className={`mb-2 rounded-md border px-2.5 py-1.5 font-mono text-[10px] tracking-[0.02em] ${
+            className={`mb-1.5 rounded border px-1.5 py-0.5 font-mono text-[8px] tracking-[0.02em] ${
               voiceError
                 ? "ui-badge-status-error"
                 : "ui-badge-status-approval"
@@ -1206,27 +1210,27 @@ const AgentChatComposer = memo(function AgentChatComposer({
             ref={inputRef}
             rows={1}
             value={value}
-            className="chat-composer-input min-h-[64px] flex-1 resize-none border-0 bg-transparent px-0 py-1 text-[15px] leading-6 text-foreground outline-none shadow-none transition placeholder:text-muted-foreground/65 focus:outline-none focus-visible:outline-none focus-visible:ring-0"
+            className="chat-composer-input min-h-[36px] flex-1 resize-none border-0 bg-transparent px-0 py-0.5 text-[10px] leading-4 text-foreground outline-none shadow-none transition placeholder:text-muted-foreground/65 focus:outline-none focus-visible:outline-none focus-visible:ring-0"
             onChange={onChange}
             onKeyDown={onKeyDown}
             placeholder="type a message"
           />
           <button
-            className="rounded-md border border-border/70 bg-surface-3 px-2.5 py-2 font-mono text-[11px] font-medium tracking-[0.02em] text-white transition hover:bg-surface-2 hover:text-white disabled:cursor-not-allowed disabled:border-border/30 disabled:bg-muted/20 disabled:text-muted-foreground"
+            className="rounded border border-border/70 bg-surface-3 px-2 py-1 font-mono text-[10px] font-medium tracking-[0.02em] text-white transition hover:bg-surface-2 hover:text-white disabled:cursor-not-allowed disabled:border-border/30 disabled:bg-muted/20 disabled:text-muted-foreground"
             type="button"
             onClick={() => attachmentInputRef.current?.click()}
             disabled={!canSend}
             aria-label="Attach files"
             title="Attach files"
           >
-            <span className="inline-flex items-center gap-1.5">
-              <Paperclip className="h-3.5 w-3.5" />
+            <span className="inline-flex items-center gap-1">
+              <Paperclip className="h-3 w-3" />
               <span>Attach</span>
             </span>
           </button>
           {voiceEnabled ? (
             <button
-              className={`rounded-md border px-2.5 py-2 font-mono text-[11px] font-medium tracking-[0.02em] transition ${
+              className={`rounded border px-2 py-1 font-mono text-[10px] font-medium tracking-[0.02em] transition ${
                 voiceRecording
                   ? "ui-btn-danger"
                   : "border-border/70 bg-surface-3 text-white hover:bg-surface-2 hover:text-white"
@@ -1238,8 +1242,8 @@ const AgentChatComposer = memo(function AgentChatComposer({
               aria-label={voiceRecording ? "Stop voice recording" : "Start voice recording"}
               title={voiceRecording ? "Stop voice recording" : "Start voice recording"}
             >
-              <span className="inline-flex items-center gap-1.5">
-                {voiceRecording ? <Square className="h-3.5 w-3.5" /> : <Mic className="h-3.5 w-3.5" />}
+              <span className="inline-flex items-center gap-1">
+                {voiceRecording ? <Square className="h-3 w-3" /> : <Mic className="h-3 w-3" />}
                 <span>{voiceLabel}</span>
               </span>
             </button>
@@ -1247,7 +1251,7 @@ const AgentChatComposer = memo(function AgentChatComposer({
           {running ? (
             <span className="inline-flex" title={stopReason || undefined}>
               <button
-                className="rounded-md border border-border/70 bg-surface-3 px-3 py-2 font-mono text-[12px] font-medium tracking-[0.02em] text-foreground transition hover:bg-surface-2 disabled:cursor-not-allowed disabled:bg-muted disabled:text-muted-foreground"
+                className="rounded border border-border/70 bg-surface-3 px-2 py-1 font-mono text-[10px] font-medium tracking-[0.02em] text-foreground transition hover:bg-surface-2 disabled:cursor-not-allowed disabled:bg-muted disabled:text-muted-foreground"
                 type="button"
                 onClick={onStop}
                 disabled={stopDisabled}
@@ -1258,7 +1262,7 @@ const AgentChatComposer = memo(function AgentChatComposer({
             </span>
           ) : null}
           <button
-            className="rounded border border-[color:var(--status-approval-border)] bg-[#0e0a04]/90 px-3 py-2 font-mono text-[12px] font-medium tracking-wider text-[color:var(--status-approval-fg)] shadow-lg backdrop-blur transition-colors hover:border-[color:var(--status-approval-border)] hover:text-[color:var(--status-approval-fg)] disabled:cursor-not-allowed disabled:border-border/30 disabled:bg-muted/20 disabled:text-muted-foreground"
+            className="rounded border border-[color:var(--status-approval-border)] bg-[#0e0a04]/90 px-2 py-1 font-mono text-[10px] font-medium tracking-wider text-[color:var(--status-approval-fg)] shadow-lg backdrop-blur transition-colors hover:border-[color:var(--status-approval-border)] hover:text-[color:var(--status-approval-fg)] disabled:cursor-not-allowed disabled:border-border/30 disabled:bg-muted/20 disabled:text-muted-foreground"
             type="button"
             onClick={onSend}
             disabled={sendDisabled}
@@ -1282,6 +1286,7 @@ export const AgentChatPanel = ({
   onOpenSettings,
   onRename,
   onNewSession,
+  onClearChat,
   onModelChange,
   onThinkingChange,
   onToolCallingToggle = noopToggle,
@@ -1294,9 +1299,13 @@ export const AgentChatPanel = ({
   pendingExecApprovals = [],
   onResolveExecApproval,
   onVoiceSend,
+  onDance,
 }: AgentChatPanelProps) => {
+  const [danceMenuOpen, setDanceMenuOpen] = useState(false);
+  const danceMenuRef = useRef<HTMLDivElement>(null);
   const [draftValue, setDraftValue] = useState(agent.draft);
   const [newSessionBusy, setNewSessionBusy] = useState(false);
+  const [clearChatBusy, setClearChatBusy] = useState(false);
   const [renameEditing, setRenameEditing] = useState(false);
   const [renameSaving, setRenameSaving] = useState(false);
   const [renameDraft, setRenameDraft] = useState(agent.name);
@@ -1335,6 +1344,40 @@ export const AgentChatPanel = ({
   const handleDraftRef = useCallback((el: HTMLTextAreaElement | HTMLInputElement | null) => {
     draftRef.current = el instanceof HTMLTextAreaElement ? el : null;
   }, []);
+
+  useEffect(() => {
+    if (!danceMenuOpen) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      if (danceMenuRef.current && !danceMenuRef.current.contains(e.target as Node)) {
+        setDanceMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+    };
+  }, [danceMenuOpen]);
+
+  const handleTriggerDance = useCallback(
+    (style: AgentDanceStyle | "stop") => {
+      if (onDance) {
+        onDance(style);
+      }
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(
+          new CustomEvent("hermes3d:trigger-dance", {
+            detail: {
+              agentId: agent.agentId,
+              danceStyle: style === "stop" ? undefined : style,
+              durationMs: style === "stop" ? 0 : 15_000,
+            },
+          }),
+        );
+      }
+      setDanceMenuOpen(false);
+    },
+    [agent.agentId, onDance],
+  );
 
   useEffect(() => {
     const previousIdentity = draftIdentityRef.current;
@@ -1637,6 +1680,18 @@ export const AgentChatPanel = ({
 
   const newSessionDisabled = newSessionBusy || !canSend || !onNewSession;
 
+  const handleClearChat = useCallback(async () => {
+    if (!onClearChat || clearChatBusy || !canSend) return;
+    setClearChatBusy(true);
+    try {
+      await onClearChat();
+    } finally {
+      setClearChatBusy(false);
+    }
+  }, [canSend, clearChatBusy, onClearChat]);
+
+  const clearChatDisabled = clearChatBusy || !canSend || !onClearChat;
+
   return (
     <div data-agent-panel className="group fade-up relative flex h-full w-full flex-col">
       <div className="px-3 pt-2 sm:px-4 sm:pt-3">
@@ -1745,6 +1800,85 @@ export const AgentChatPanel = ({
                 onClick={onOpenSettings}
               >
                 <ChevronRight className="h-3.5 w-3.5" />
+              </button>
+            ) : null}
+            <div className="relative" ref={danceMenuRef}>
+              <button
+                className={`nodrag inline-flex items-center gap-1 whitespace-nowrap rounded border px-2 py-0.5 font-mono text-[9px] font-medium tracking-[0.02em] transition ${
+                  danceMenuOpen
+                    ? "border-primary/50 bg-primary/20 text-primary"
+                    : "border-white/15 bg-white/5 text-white/80 hover:bg-white/10 hover:text-white"
+                }`}
+                type="button"
+                data-testid="agent-dance-trigger"
+                aria-label="Trigger dance animation"
+                title="Dance emotes"
+                onClick={() => setDanceMenuOpen((v) => !v)}
+              >
+                <Music className="h-2.5 w-2.5" />
+                <span>Dance</span>
+              </button>
+              {danceMenuOpen ? (
+                <div className="absolute right-0 top-full z-50 mt-1 min-w-[120px] rounded-md border border-border/70 bg-popover/95 py-1 shadow-xl backdrop-blur-md">
+                  <button
+                    type="button"
+                    className="w-full px-2.5 py-1 text-left font-mono text-[9px] text-foreground hover:bg-accent/40"
+                    onClick={() => handleTriggerDance("cheer")}
+                  >
+                    Cheer
+                  </button>
+                  <button
+                    type="button"
+                    className="w-full px-2.5 py-1 text-left font-mono text-[9px] text-foreground hover:bg-accent/40"
+                    onClick={() => handleTriggerDance("disco")}
+                  >
+                    Disco
+                  </button>
+                  <button
+                    type="button"
+                    className="w-full px-2.5 py-1 text-left font-mono text-[9px] text-foreground hover:bg-accent/40"
+                    onClick={() => handleTriggerDance("wave")}
+                  >
+                    Robot Wave
+                  </button>
+                  <button
+                    type="button"
+                    className="w-full px-2.5 py-1 text-left font-mono text-[9px] text-foreground hover:bg-accent/40"
+                    onClick={() => handleTriggerDance("spin")}
+                  >
+                    360 Spin
+                  </button>
+                  <button
+                    type="button"
+                    className="w-full px-2.5 py-1 text-left font-mono text-[9px] text-foreground hover:bg-accent/40"
+                    onClick={() => handleTriggerDance("rock")}
+                  >
+                    Rock Headbang
+                  </button>
+                  <div className="my-0.5 border-t border-border/40" />
+                  <button
+                    type="button"
+                    className="w-full px-2.5 py-1 text-left font-mono text-[9px] text-destructive hover:bg-destructive/20"
+                    onClick={() => handleTriggerDance("stop")}
+                  >
+                    Stop Dance
+                  </button>
+                </div>
+              ) : null}
+            </div>
+            {onClearChat ? (
+              <button
+                className="nodrag inline-flex items-center whitespace-nowrap rounded border border-white/15 bg-white/5 px-2 py-0.5 font-mono text-[9px] font-medium tracking-[0.02em] text-white/80 transition hover:bg-white/10 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+                type="button"
+                data-testid="agent-clear-chat-toggle"
+                aria-label="Clear chat"
+                title="Clear chat"
+                onClick={() => {
+                  void handleClearChat();
+                }}
+                disabled={clearChatDisabled}
+              >
+                {clearChatBusy ? "Clearing..." : "Clear chat"}
               </button>
             ) : null}
             <button

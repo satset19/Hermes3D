@@ -120,7 +120,6 @@ describe("office event triggers", () => {
 
     expect(animationState.githubHoldByAgentId.main).toBe(true);
     expect(animationState.qaHoldByAgentId.qa).toBe(true);
-    expect(animationState.skillGymHoldByAgentId.skill).toBe(true);
   });
 
   it("reacts to runtime chat commands regardless of channel transport", () => {
@@ -136,19 +135,6 @@ describe("office event triggers", () => {
         sessionKey: "agent:worker:slack",
       }),
     ];
-    const gymEvent: EventFrame = {
-      type: "event",
-      event: "chat",
-      payload: {
-        runId: "run-worker",
-        sessionKey: "agent:worker:slack",
-        state: "final",
-        message: {
-          role: "user",
-          text: "Let's go to the gym.",
-        },
-      },
-    };
     const standupEvent: EventFrame = {
       type: "event",
       event: "chat",
@@ -162,21 +148,13 @@ describe("office event triggers", () => {
         },
       },
     };
-
-    const afterGym = reduceOfficeAnimationTriggerEvent({
-      state: createOfficeAnimationTriggerState(),
-      agents,
-      event: gymEvent,
-      nowMs: 5_000,
-    });
     const afterStandup = reduceOfficeAnimationTriggerEvent({
-      state: afterGym,
+      state: createOfficeAnimationTriggerState(),
       agents,
       event: standupEvent,
       nowMs: 6_000,
     });
 
-    expect(afterStandup.manualGymUntilByAgentId.worker).toBeGreaterThan(5_000);
     expect(afterStandup.pendingStandupRequest?.message).toBe(
       "Start the standup meeting.",
     );
@@ -237,26 +215,7 @@ describe("office event triggers", () => {
         },
       },
     });
-    const afterGym = reduceOfficeAnimationTriggerEvent({
-      state: afterDesk,
-      agents,
-      nowMs: 8_000,
-      event: {
-        type: "event",
-        event: "chat",
-        payload: {
-          runId: "run-worker-telegram",
-          sessionKey: "agent:worker:telegram",
-          state: "final",
-          message: {
-            text: "Go to the gym.",
-          },
-        },
-      },
-    });
-
-    expect(afterGym.deskHoldByAgentId.worker).toBe(true);
-    expect(afterGym.manualGymUntilByAgentId.worker).toBeGreaterThan(8_000);
+    expect(afterDesk.deskHoldByAgentId.worker).toBe(true);
   });
 
   it("tracks streaming and reasoning activity from runtime events", () => {
@@ -312,29 +271,6 @@ describe("office event triggers", () => {
     expect(animationState.streamingByAgentId["agent-1"]).toBe(true);
     expect(animationState.thinkingByAgentId["agent-1"]).toBe(true);
     expect(animationState.workingUntilByAgentId["agent-1"]).toBeGreaterThan(10_000);
-  });
-
-  it("suppresses desk holds while a gym command is active", () => {
-    const agents = [
-      makeAgent({
-        agentId: "agent-1",
-        name: "Agent 1",
-        sessionKey: "agent:agent-1:main",
-      }),
-    ];
-
-    const animationState = buildOfficeAnimationState({
-      agents,
-      nowMs: 11_000,
-      state: {
-        ...createOfficeAnimationTriggerState(),
-        deskHoldByAgentId: { "agent-1": true },
-        manualGymUntilByAgentId: { "agent-1": 12_000 },
-      },
-    });
-
-    expect(animationState.gymHoldByAgentId["agent-1"]).toBe(true);
-    expect(animationState.deskHoldByAgentId["agent-1"]).toBeUndefined();
   });
 
   it("suppresses dismissed github holds until a new command arrives and emits cleanup cues", () => {

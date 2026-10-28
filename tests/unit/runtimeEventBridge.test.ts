@@ -217,7 +217,6 @@ describe("runtime event bridge helpers", () => {
         agentId: "agent-1",
         patch: {
           lastActivityAt: 111,
-          lastAssistantMessageAt: 111,
           latestPreview: "assistant latest",
           lastUserMessage: "hello there",
         },
@@ -229,6 +228,58 @@ describe("runtime event bridge helpers", () => {
         },
       },
     ]);
+  });
+
+  it("only sets lastAssistantMessageAt for genuine positive timestamps and never falls back to activity", () => {
+    const validPatches = buildSummarySnapshotPatches({
+      agents: [{ agentId: "agent-1", sessionKey: "agent:agent-1:studio:session-a" }],
+      statusSummary: {
+        sessions: {
+          recent: [{ key: "agent:agent-1:studio:session-a", updatedAt: 9999 }],
+        },
+      },
+      previewResult: {
+        ts: 0,
+        previews: [
+          {
+            key: "agent:agent-1:studio:session-a",
+            status: "ok",
+            items: [
+              { role: "assistant", text: "reply", timestamp: 12345 },
+            ],
+          },
+        ],
+      },
+    });
+
+    expect(validPatches[0].patch.lastAssistantMessageAt).toBe(12345);
+
+    const zeroOrInvalid = [0, -1, "not-a-date", undefined];
+    for (const invalidTs of zeroOrInvalid) {
+      const patches = buildSummarySnapshotPatches({
+        agents: [{ agentId: "agent-1", sessionKey: "agent:agent-1:studio:session-a" }],
+        statusSummary: {
+          sessions: {
+            recent: [{ key: "agent:agent-1:studio:session-a", updatedAt: 9999 }],
+          },
+        },
+        previewResult: {
+          ts: 0,
+          previews: [
+            {
+              key: "agent:agent-1:studio:session-a",
+              status: "ok",
+              items: [
+                { role: "assistant", text: "reply", timestamp: invalidTs },
+              ],
+            },
+          ],
+        },
+      });
+
+      expect(patches[0].patch.lastAssistantMessageAt).toBeUndefined();
+      expect(patches[0].patch.lastActivityAt).toBe(9999);
+    }
   });
 
   it("returns no entries when snapshots produce no patch fields", () => {

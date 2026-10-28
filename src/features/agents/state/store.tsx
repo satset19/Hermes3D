@@ -30,6 +30,7 @@ export type AgentStoreSeed = {
   identityName?: string | null;
   sessionDisplayName?: string | null;
   role?: string | null;
+  teamId?: string | null;
   sessionKey: string;
   avatarSeed?: string | null;
   avatarProfile?: AgentAvatarProfile | null;
@@ -114,6 +115,23 @@ export const buildNewSessionAgentPatch = (agent: AgentState): Partial<AgentState
   };
 };
 
+export const buildClearChatAgentPatch = (agent: AgentState): Partial<AgentState> => {
+  return {
+    outputLines: [],
+    transcriptEntries: [],
+    transcriptRevision: (agent.transcriptRevision ?? 0) + 1,
+    transcriptSequenceCounter: 0,
+    streamText: null,
+    thinkingTrace: null,
+    historyLoadedAt: null,
+    historyFetchLimit: null,
+    historyFetchedCount: null,
+    historyMaybeTruncated: false,
+    lastAssistantMessageAt: null,
+    lastUserMessage: null,
+  };
+};
+
 export type AgentStoreState = {
   agents: AgentState[];
   selectedAgentId: string | null;
@@ -127,6 +145,7 @@ type Action =
   | { type: "setLoading"; loading: boolean }
   | { type: "updateAgent"; agentId: string; patch: Partial<AgentState> }
   | { type: "removeAgent"; agentId: string }
+  | { type: "clearChat"; agentId: string }
   | { type: "appendOutput"; agentId: string; line: string; transcript?: TranscriptAppendMeta }
   | { type: "enqueueQueuedMessage"; agentId: string; message: string }
   | { type: "removeQueuedMessage"; agentId: string; index: number }
@@ -204,6 +223,7 @@ const createRuntimeAgentState = (
     : [];
   return {
     ...seed,
+    teamId: seed.teamId ?? existing?.teamId ?? null,
     avatarSeed: seed.avatarSeed ?? existing?.avatarSeed ?? seed.agentId,
     avatarProfile: seed.avatarProfile ?? existing?.avatarProfile ?? null,
     avatarUrl: seed.avatarUrl ?? existing?.avatarUrl ?? null,
@@ -371,6 +391,17 @@ const reducer = (state: AgentStoreState, action: Action): AgentStoreState => {
         selectedAgentId,
       };
     }
+    case "clearChat":
+      return {
+        ...state,
+        agents: state.agents.map((agent) => {
+          if (agent.agentId !== action.agentId) return agent;
+          return {
+            ...agent,
+            ...buildClearChatAgentPatch(agent),
+          };
+        }),
+      };
     case "appendOutput":
       return {
         ...state,

@@ -19,21 +19,30 @@ const agents = new Map([
     },
   ],
   [
-    "demo-researcher",
+    "demo-fe-specialist",
     {
-      id: "demo-researcher",
-      name: "Mika",
-      role: "Research",
-      workspace: "/demo/research",
+      id: "demo-fe-specialist",
+      name: "Kai",
+      role: "Frontend Specialist",
+      workspace: "/demo/fe-specialist",
     },
   ],
   [
-    "demo-builder",
+    "demo-backend",
     {
-      id: "demo-builder",
-      name: "Rune",
-      role: "Builder",
-      workspace: "/demo/builder",
+      id: "demo-backend",
+      name: "Jax",
+      role: "Backend Developer",
+      workspace: "/demo/backend",
+    },
+  ],
+  [
+    "demo-architect",
+    {
+      id: "demo-architect",
+      name: "Vance",
+      role: "Systems Architect",
+      workspace: "/demo/architect",
     },
   ],
 ]);
@@ -43,6 +52,7 @@ const sessionSettings = new Map();
 const conversationHistory = new Map();
 const activeRuns = new Map();
 const activeSendEventFns = new Set();
+const teams = new Map();
 
 function randomId() {
   return randomUUID().replace(/-/g, "");
@@ -86,6 +96,7 @@ function agentListPayload() {
     workspace: agent.workspace,
     identity: { name: agent.name, emoji: "🤖" },
     role: agent.role,
+    teamId: agent.teamId || null,
   }));
 }
 
@@ -99,7 +110,7 @@ function buildDemoReply(agent, message) {
       : `${agent.name} checking in from the ${agent.role.toLowerCase()} desk.`;
   if (greetingOnly) {
     return agent.role === "Orchestrator"
-      ? `${opening} I can coordinate the room, sketch a plan, or hand work to Research and Builder.`
+      ? `${opening} I can coordinate the room, sketch a plan, or hand work to Frontend Specialist, Backend, and Architect.`
       : `${opening} Give me a concrete task and I will respond in-character with a focused next step.`;
   }
   const focusLine =
@@ -107,11 +118,13 @@ function buildDemoReply(agent, message) {
       ? `${compactMessage.slice(0, 160).trimEnd()}...`
       : compactMessage;
   const action =
-    agent.role === "Research"
-      ? "I would turn this into source checks, constraints, and follow-up questions."
-      : agent.role === "Builder"
-        ? "I would translate this into implementation steps, edge cases, and validation."
-        : "I would route the work, keep the team aligned, and summarize the next move.";
+    agent.role === "Frontend Specialist"
+      ? "I would turn this into UI components, styles, and interaction flows."
+      : agent.role === "Backend Developer"
+        ? "I would translate this into API endpoints, data models, and services."
+        : agent.role === "Systems Architect"
+          ? "I would review system boundaries, design patterns, and scalability."
+          : "I would route the work, keep the team aligned, and summarize the next move.";
   return `${opening} Focus: ${focusLine}. ${action}`;
 }
 
@@ -120,11 +133,17 @@ async function handleMethod(method, params, id, sendEvent) {
 
   switch (method) {
     case "agents.list":
-      return resOk(id, { defaultId: "demo-orchestrator", mainKey: MAIN_KEY, agents: agentListPayload() });
+      return resOk(id, {
+        defaultId: "demo-orchestrator",
+        mainKey: MAIN_KEY,
+        agents: agentListPayload(),
+        teams: [...teams.values()],
+      });
 
     case "agents.create": {
       const name = typeof p.name === "string" && p.name.trim() ? p.name.trim() : "Demo Agent";
       const role = typeof p.role === "string" ? p.role.trim() : "";
+      const teamId = typeof p.teamId === "string" ? p.teamId.trim() || null : null;
       const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "demo-agent";
       const agentId = `${slug}-${randomId().slice(0, 6)}`;
       agents.set(agentId, {
@@ -132,6 +151,7 @@ async function handleMethod(method, params, id, sendEvent) {
         name,
         role,
         workspace: `/demo/${slug}`,
+        teamId,
       });
       broadcastEvent({
         type: "event",
@@ -147,6 +167,8 @@ async function handleMethod(method, params, id, sendEvent) {
       if (!agent) return resErr(id, "not_found", `Agent ${agentId} not found`);
       if (typeof p.name === "string" && p.name.trim()) agent.name = p.name.trim();
       if (typeof p.role === "string") agent.role = p.role.trim();
+      if (typeof p.teamId === "string") agent.teamId = p.teamId.trim() || null;
+      if (p.teamId === null) agent.teamId = null;
       return resOk(id, { ok: true, removedBindings: 0 });
     }
 
@@ -169,6 +191,53 @@ async function handleMethod(method, params, id, sendEvent) {
       const key = `${p.agentId || "demo-orchestrator"}/${p.name || ""}`;
       files.set(key, typeof p.content === "string" ? p.content : "");
       return resOk(id, {});
+    }
+
+    case "teams.list":
+      return resOk(id, { teams: [...teams.values()] });
+
+    case "teams.create": {
+      const teamName = typeof p.name === "string" && p.name.trim() ? p.name.trim() : "Team";
+      const teamSlug = teamName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+      const teamId = typeof p.id === "string" && p.id.trim() ? p.id.trim() : `team-${teamSlug}-${randomId().slice(0, 4)}`;
+      const team = {
+        id: teamId,
+        name: teamName,
+        enabled: typeof p.enabled === "boolean" ? p.enabled : true,
+        createdAt: new Date().toISOString(),
+      };
+      teams.set(teamId, team);
+      broadcastEvent({ type: "event", event: "teams", payload: { teams: [...teams.values()] } });
+      return resOk(id, { team });
+    }
+
+    case "teams.update": {
+      const tid = typeof p.teamId === "string" ? p.teamId.trim() : "";
+      const team = teams.get(tid);
+      if (!team) return resErr(id, "not_found", `Team ${tid} not found`);
+      if (typeof p.name === "string" && p.name.trim()) team.name = p.name.trim();
+      if (typeof p.enabled === "boolean") team.enabled = p.enabled;
+      broadcastEvent({ type: "event", event: "teams", payload: { teams: [...teams.values()] } });
+      return resOk(id, { team });
+    }
+
+    case "teams.delete": {
+      const dtid = typeof p.teamId === "string" ? p.teamId.trim() : "";
+      teams.delete(dtid);
+      for (const agent of agents.values()) {
+        if (agent.teamId === dtid) agent.teamId = null;
+      }
+      broadcastEvent({ type: "event", event: "teams", payload: { teams: [...teams.values()] } });
+      return resOk(id, { ok: true });
+    }
+
+    case "teams.toggle": {
+      const ttid = typeof p.teamId === "string" ? p.teamId.trim() : "";
+      const tteam = teams.get(ttid);
+      if (!tteam) return resErr(id, "not_found", `Team ${ttid} not found`);
+      tteam.enabled = typeof p.enabled === "boolean" ? p.enabled : !tteam.enabled;
+      broadcastEvent({ type: "event", event: "teams", payload: { teams: [...teams.values()] } });
+      return resOk(id, { team: tteam });
     }
 
     case "config.get":
@@ -274,6 +343,17 @@ async function handleMethod(method, params, id, sendEvent) {
       const message = typeof p.message === "string" ? p.message.trim() : String(p.message || "").trim();
       const runId = typeof p.idempotencyKey === "string" && p.idempotencyKey ? p.idempotencyKey : randomId();
       if (!message) return resOk(id, { status: "no-op", runId });
+
+      if (agent && agent.teamId) {
+        const agentTeam = teams.get(agent.teamId);
+        if (agentTeam && !agentTeam.enabled) {
+          return resErr(
+            id,
+            "team_disabled",
+            `Agent ${agent.name} is part of disabled team "${agentTeam.name}". Enable the team first.`
+          );
+        }
+      }
 
       const reply = buildDemoReply(agent, message);
       let aborted = false;
@@ -450,6 +530,11 @@ function startAdapter() {
                 "agents.create",
                 "agents.delete",
                 "agents.update",
+                "teams.list",
+                "teams.create",
+                "teams.update",
+                "teams.delete",
+                "teams.toggle",
                 "sessions.list",
                 "sessions.preview",
                 "sessions.patch",
@@ -472,7 +557,7 @@ function startAdapter() {
                 "models.list",
                 "cron.list",
               ],
-              events: ["chat", "presence", "heartbeat"],
+              events: ["chat", "presence", "heartbeat", "teams"],
             },
             snapshot: {
               health: {
@@ -521,4 +606,6 @@ if (require.main === module) {
 module.exports = {
   handleMethod,
   startAdapter,
+  agents,
+  teams,
 };

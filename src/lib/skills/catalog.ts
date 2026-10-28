@@ -66,7 +66,7 @@ export const getPackagedSkillById = (
 export const getPackagedSkillBySkillKey = (
   skillKey: string,
 ): PackagedSkillDefinition | null => {
-  const normalized = skillKey.trim();
+  const normalized = skillKey?.trim();
   return PACKAGED_SKILLS.find((skill) => skill.skillKey === normalized) ?? null;
 };
 
@@ -93,7 +93,7 @@ export const buildPackagedSkillStatusEntry = (
 export const appendPackagedSkillsToMarketplace = (
   skills: SkillStatusEntry[],
 ): SkillStatusEntry[] => {
-  const presentKeys = new Set(skills.map((skill) => skill.skillKey.trim()));
+  const presentKeys = new Set(skills.map((skill) => (typeof skill.skillKey === "string" ? skill.skillKey.trim() : "")));
   const additions = PACKAGED_SKILLS.filter(
     (skill) => !presentKeys.has(skill.skillKey),
   ).map(buildPackagedSkillStatusEntry);
